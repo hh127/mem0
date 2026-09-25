@@ -16,6 +16,7 @@ from mem0.configs.llms.openai import OpenAIConfig
 from mem0.configs.llms.vllm import VllmConfig
 from mem0.configs.llms.xai import XAIConfig
 from mem0.configs.rerankers.base import BaseRerankerConfig
+from mem0.configs.rerankers.cloud import CloudRerankerConfig
 from mem0.configs.rerankers.cohere import CohereRerankerConfig
 from mem0.configs.rerankers.huggingface import HuggingFaceRerankerConfig
 from mem0.configs.rerankers.llm import LLMRerankerConfig
@@ -239,6 +240,8 @@ class RerankerFactory:
         "zero_entropy": ("mem0.reranker.zero_entropy_reranker.ZeroEntropyReranker", ZeroEntropyRerankerConfig),
         "llm_reranker": ("mem0.reranker.llm_reranker.LLMReranker", LLMRerankerConfig),
         "huggingface": ("mem0.reranker.huggingface_reranker.HuggingFaceReranker", HuggingFaceRerankerConfig),
+        # Generic third-party cloud rerank API (Cohere/Jina/SiliconFlow-compatible).
+        "cloud_reranker": ("mem0.reranker.cloud_reranker.CloudReranker", CloudRerankerConfig),
     }
 
     @classmethod
