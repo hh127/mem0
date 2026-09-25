@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import time
@@ -113,12 +114,67 @@ POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
 POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "")
+EMBEDDER_BASE_URL = os.environ.get("EMBEDDER_BASE_URL", "")
+EMBEDDER_API_KEY = os.environ.get("EMBEDDER_API_KEY", OPENAI_API_KEY)
 HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
 DEFAULT_LLM_MODEL = os.environ.get("MEM0_DEFAULT_LLM_MODEL", "gpt-5-mini")
 DEFAULT_EMBEDDER_MODEL = os.environ.get("MEM0_DEFAULT_EMBEDDER_MODEL", "text-embedding-3-small")
 
+EMBEDDING_DIMS = int(os.environ.get("EMBEDDING_DIMS", "4096"))
+
+# --- Optional reranker (third-party cloud rerank API) --------------------------
+# Any provider registered in mem0.utils.factory.RerankerFactory may be used
+# (cloud_reranker, llm_reranker, cohere, zero_entropy, huggingface,
+# sentence_transformer). For provider="cloud_reranker" the simple env vars
+# below are sufficient; for anything else set RERANKER_CONFIG_JSON instead.
+RERANKER_PROVIDER = os.environ.get("RERANKER_PROVIDER", "").strip()
+RERANKER_BASE_URL = os.environ.get("RERANKER_BASE_URL", "").strip()
+RERANKER_API_KEY = os.environ.get("RERANKER_API_KEY", "").strip()
+RERANKER_MODEL = os.environ.get("MEM0_DEFAULT_RERANKER_MODEL", "").strip()
+RERANKER_TOP_K = int(os.environ.get("RERANKER_TOP_K", "3") or 3)
+RERANKER_CONFIG_JSON = os.environ.get("RERANKER_CONFIG_JSON", "").strip()
+
+
+def _build_reranker_config() -> Dict[str, Any]:
+    """Build the optional reranker section of DEFAULT_CONFIG.
+
+    Returns an empty dict when no reranker is configured, so the server keeps
+    running without reranking (search still works, just without rescoring).
+    """
+    if RERANKER_CONFIG_JSON:
+        try:
+            return {"reranker": json.loads(RERANKER_CONFIG_JSON)}
+        except json.JSONDecodeError as e:
+            logging.warning("RERANKER_CONFIG_JSON is not valid JSON, ignoring: %s", e)
+            return {}
+    if not RERANKER_PROVIDER:
+        return {}
+
+    config: Dict[str, Any] = {"top_k": RERANKER_TOP_K}
+    if RERANKER_BASE_URL:
+        config["base_url"] = RERANKER_BASE_URL
+    if RERANKER_API_KEY:
+        config["api_key"] = RERANKER_API_KEY
+    if RERANKER_MODEL:
+        config["model"] = RERANKER_MODEL
+    return {"reranker": {"provider": RERANKER_PROVIDER, "config": config}}
+
+
+# v3 extraction (ADDITIVE_EXTRACTION_PROMPT) carries NO language instruction, so memories come out
+# in ENGLISH even for Chinese input. Upstream ships a `use_input_language=True` block in
+# mem0/configs/prompts.py but never wires it up at its call sites. This default keeps extraction
+# in Chinese even when the Postgres `config_overrides` row is absent (fresh/reset DB, new host).
+# Note: the DB override still wins when it sets custom_instructions.
+DEFAULT_CUSTOM_INSTRUCTIONS = os.environ.get(
+    "MEM0_CUSTOM_INSTRUCTIONS",
+    "【语言要求 — 最重要】无论对话使用何种语言，记忆内容必须始终用【简体中文】书写，"
+    "严禁翻译成英文。技术术语、产品型号、公司名、人名、专有名词保持输入中的原样形式。",
+)
+
 DEFAULT_CONFIG = {
     "version": "v1.1",
+    "custom_instructions": DEFAULT_CUSTOM_INSTRUCTIONS,
     "vector_store": {
         "provider": "pgvector",
         "config": {
@@ -128,14 +184,17 @@ DEFAULT_CONFIG = {
             "user": POSTGRES_USER,
             "password": POSTGRES_PASSWORD,
             "collection_name": POSTGRES_COLLECTION_NAME,
+            "embedding_model_dims": EMBEDDING_DIMS,
         },
     },
     "llm": {
         "provider": "openai",
-        "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": DEFAULT_LLM_MODEL},
+        "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": DEFAULT_LLM_MODEL, **({"openai_base_url": LLM_BASE_URL} if LLM_BASE_URL else {})},
     },
-    "embedder": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": DEFAULT_EMBEDDER_MODEL}},
+    "embedder": {"provider": "openai", "config": {"api_key": EMBEDDER_API_KEY, "model": DEFAULT_EMBEDDER_MODEL, **({"openai_base_url": EMBEDDER_BASE_URL} if EMBEDDER_BASE_URL else {})}},
     "history_db_path": HISTORY_DB_PATH,
+    # Injected only when the RERANKER_* env vars are set.
+    **_build_reranker_config(),
 }
 
 
@@ -204,6 +263,10 @@ class SearchRequest(BaseModel):
     top_k: Optional[int] = Field(None, description="Maximum number of results to return.")
     threshold: Optional[float] = Field(None, description="Minimum similarity score for results.")
     explain: Optional[bool] = Field(None, description="Include score details for each search result.")
+    rerank: Optional[bool] = Field(
+        None,
+        description="Rescore results with the configured reranker and return them reordered.",
+    )
     show_expired: Optional[bool] = Field(None, description="Include expired memories.")
 
 
@@ -473,6 +536,8 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
             params["threshold"] = search_req.threshold
         if search_req.explain is not None:
             params["explain"] = search_req.explain
+        if search_req.rerank is not None:
+            params["rerank"] = search_req.rerank
         if search_req.show_expired is not None:
             params["show_expired"] = search_req.show_expired
         return get_memory_instance().search(query=search_req.query, filters=filters, **params)
