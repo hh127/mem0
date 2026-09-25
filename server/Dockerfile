@@ -4,6 +4,8 @@ WORKDIR /app
 
 COPY requirements.txt .
 
+# Force rebuild when requirements change (cache bust)
+ARG CACHEBUST=1
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
