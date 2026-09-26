@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
 import { Card } from "@/components/ui/card";
 import { DataTable } from "@/components/shared/data-table";
 import { TableSkeleton } from "@/components/shared/table-skeleton";
@@ -40,8 +41,11 @@ export default function MemoriesPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [searchInput, setSearchInput] = useState("");
   const [activeSearch, setActiveSearch] = useState("");
+  // 重排开关：默认开（语义搜索先用向量召回，再用重排模型精排）
+  const [useRerank, setUseRerank] = useState(true);
   // 用 ref 存查询词：提交后立即 refetch，此时 state 还没更新完
   const searchQueryRef = useRef("");
+  const rerankRef = useRef(true);
   const [page, setPage] = useState(0);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -78,6 +82,7 @@ export default function MemoriesPage() {
               query,
               filters: { user_id: uid },
               top_k: MEMORY_FETCH_LIMIT,
+              rerank: rerankRef.current,
             }),
           ),
         );
@@ -110,9 +115,17 @@ export default function MemoriesPage() {
   const runSearch = () => {
     const q = searchInput.trim();
     searchQueryRef.current = q;
+    rerankRef.current = useRerank;
     setActiveSearch(q);
     setPage(0);
     void refetch();
+  };
+
+  // 切换重排后若已有搜索结果，立即重搜一次（否则等下次点搜索）
+  const toggleRerank = (next: boolean) => {
+    setUseRerank(next);
+    rerankRef.current = next;
+    if (searchQueryRef.current.trim()) void refetch();
   };
 
   const clearSearch = () => {
@@ -249,6 +262,10 @@ export default function MemoriesPage() {
           <Search className="size-3.5 mr-1" />
           搜索
         </Button>
+        <label className="flex items-center gap-1.5 text-xs text-onSurface-default-tertiary select-none">
+          <Switch checked={useRerank} onCheckedChange={toggleRerank} />
+          使用重排
+        </label>
         {activeSearch && (
           <Button variant="ghost" size="sm" onClick={clearSearch}>
             <X className="size-3.5 mr-1" />
@@ -260,6 +277,7 @@ export default function MemoriesPage() {
       {activeSearch && (
         <p className="text-sm text-onSurface-default-tertiary">
           搜索「{activeSearch}」—— 命中 {memories.length} 条，按相关度排序
+          {useRerank ? "（已用重排模型精排）" : "（仅向量召回，未重排）"}
           {userId.trim() ? `（限用户 ${userId.trim()}）` : ""}
         </p>
       )}
