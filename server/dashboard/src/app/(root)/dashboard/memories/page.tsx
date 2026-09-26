@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { Trash2 } from "lucide-react";
+import { Pencil, Trash2 } from "lucide-react";
 import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import { DataTable } from "@/components/shared/data-table";
 import { TableSkeleton } from "@/components/shared/table-skeleton";
@@ -34,6 +35,9 @@ export default function MemoriesPage() {
   const [userId, setUserId] = useState("");
   const [selectedMemory, setSelectedMemory] = useState<Memory | null>(null);
   const [memoryToDelete, setMemoryToDelete] = useState<Memory | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editText, setEditText] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
   const [page, setPage] = useState(0);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -59,12 +63,54 @@ export default function MemoriesPage() {
     (page + 1) * PAGE_SIZE,
   );
 
+  const closeDetail = () => {
+    setSelectedMemory(null);
+    setIsEditing(false);
+  };
+
+  const startEditing = (memory: Memory) => {
+    setEditText(memory.memory);
+    setIsEditing(true);
+  };
+
+  const handleUpdate = async () => {
+    if (!selectedMemory) return;
+    const text = editText.trim();
+    if (!text) {
+      toast({ title: "记忆内容不能为空", variant: "destructive" });
+      return;
+    }
+    if (text === selectedMemory.memory) {
+      setIsEditing(false);
+      return;
+    }
+    setIsSaving(true);
+    try {
+      await api.put(MEMORY_ENDPOINTS.BY_ID(selectedMemory.id), { text });
+      setSelectedMemory({ ...selectedMemory, memory: text });
+      setIsEditing(false);
+      toast({ title: "记忆已更新", variant: "success" });
+      void refetch();
+    } catch (error) {
+      toast({
+        title: "记忆更新失败",
+        description: getErrorMessage(error),
+        variant: "destructive",
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (!memoryToDelete) return;
     try {
       await api.delete(MEMORY_ENDPOINTS.BY_ID(memoryToDelete.id));
       toast({ title: "记忆已删除", variant: "success" });
-      if (selectedMemory?.id === memoryToDelete.id) setSelectedMemory(null);
+      if (selectedMemory?.id === memoryToDelete.id) {
+        setSelectedMemory(null);
+        setIsEditing(false);
+      }
       setMemoryToDelete(null);
       void refetch();
     } catch (error) {
@@ -133,9 +179,9 @@ export default function MemoriesPage() {
           description="Create your first memory by sending a POST /memories request."
         >
           <pre className="text-xs text-left bg-surface-default-secondary p-3 rounded font-mono overflow-x-auto mt-3 max-w-lg">
-            {`curl -X POST ${apiUrl}/memories \\
-  -H "X-API-Key: <your-key>" \\
-  -H "Content-Type: application/json" \\
+            {`curl -X POST ${apiUrl}/memories \\\\
+  -H "X-API-Key: *** \\\\
+  -H "Content-Type: application/json" \\\\
   -d '{"messages": [{"role": "user", "content": "我喜欢徒步"}], "user_id": "alice"}'`}
           </pre>
           <a
@@ -154,7 +200,10 @@ export default function MemoriesPage() {
               data={paginatedMemories}
               columns={columns}
               getRowKey={(row) => row.id}
-              onRowClick={(row) => setSelectedMemory(row)}
+              onRowClick={(row) => {
+                setSelectedMemory(row);
+                setIsEditing(false);
+              }}
               getRowClassName={(row) =>
                 selectedMemory?.id === row.id
                   ? "bg-surface-default-tertiary"
@@ -195,23 +244,61 @@ export default function MemoriesPage() {
       <Sheet
         open={!!selectedMemory}
         onOpenChange={(open) => {
-          if (!open) setSelectedMemory(null);
+          if (!open) closeDetail();
         }}
       >
         <SheetContent className="sm:max-w-md">
           <SheetHeader>
             <SheetTitle>记忆详情</SheetTitle>
             <SheetDescription className="sr-only">
-              查看记忆内容和元数据
+              查看和修改记忆内容
             </SheetDescription>
           </SheetHeader>
           {selectedMemory && (
             <div className="mt-6 space-y-4">
               <div className="space-y-1">
-                <Label className="text-xs text-onSurface-default-tertiary">
-                  内容
-                </Label>
-                <p className="text-sm">{selectedMemory.memory}</p>
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs text-onSurface-default-tertiary">
+                    内容
+                  </Label>
+                  {!isEditing && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => startEditing(selectedMemory)}
+                    >
+                      <Pencil className="size-3.5 mr-1" />
+                      编辑
+                    </Button>
+                  )}
+                </div>
+                {isEditing ? (
+                  <div className="space-y-2">
+                    <Textarea
+                      value={editText}
+                      onChange={(e) => setEditText(e.target.value)}
+                      rows={4}
+                      className="text-sm"
+                      autoFocus
+                    />
+                    <div className="flex gap-2">
+                      <Button size="sm" disabled={isSaving} onClick={handleUpdate}>
+                        {isSaving ? "保存中…" : "保存"}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={isSaving}
+                        onClick={() => setIsEditing(false)}
+                      >
+                        取消
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm">{selectedMemory.memory}</p>
+                )}
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
