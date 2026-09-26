@@ -72,3 +72,29 @@ class Settings(Base):
         default=_utcnow,
         onupdate=_utcnow,
     )
+
+
+class TokenUsage(Base):
+    """单次模型调用的真实 token 用量（记忆系统用的三个模型）。
+
+    一次记忆写入会触发多次调用（LLM 抽取 + 嵌入），一条搜索会触发嵌入 + 重排，
+    所以这里按「调用」逐条记录，而不是按请求汇总。
+    """
+
+    __tablename__ = "token_usage"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_new_uuid)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True
+    )
+    # llm（记忆抽取/更新判断） | embedder（向量化） | reranker（重排）
+    model_type: Mapped[str] = mapped_column(String(16), index=True)
+    model_name: Mapped[str] = mapped_column(String(128), default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # add | search | update | delete | other
+    operation: Mapped[str] = mapped_column(String(32), default="", index=True)
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+

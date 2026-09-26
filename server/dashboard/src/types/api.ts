@@ -37,6 +37,37 @@ export interface ApiRequestLog {
 
 export type EntityType = "user" | "agent" | "run";
 
+export interface UsageStatRow {
+  key: string;
+  model_type: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  calls: number;
+}
+
+export interface UsageModelSummary {
+  model_type: string;
+  model_name: string;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface UsageStatsResponse {
+  group_by: string;
+  days: number;
+  rows: UsageStatRow[];
+  totals: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    calls: number;
+  };
+  by_model: UsageModelSummary[];
+}
+
 export interface Entity {
   id: string;
   type: EntityType;

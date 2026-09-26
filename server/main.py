@@ -40,10 +40,12 @@ from slowapi.errors import RateLimitExceeded
 from sqlalchemy import func, select
 
 from mem0.exceptions import ValidationError as Mem0ValidationError
+from usage_hooks import install_usage_hooks, reset_usage_context, set_usage_context
 
 load_dotenv()
 
 install_request_id_logging()
+install_usage_hooks()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(request_id)s] %(message)s")
 
 MIN_KEY_LENGTH = 16
@@ -352,11 +354,22 @@ def _persist_request_log(method: str, path: str, status_code: int, latency_ms: f
         session.close()
 
 
+def _operation_for_path(path: str, method: str) -> str:
+    """æè¯·æ±æ å°æç¨éç»è®¡éçæä½ç»´åº¦ã"""
+    if path.startswith("/memories"):
+        return {"POST": "add", "PUT": "update", "DELETE": "delete"}.get(method, "read")
+    if path.startswith("/search"):
+        return "search"
+    return "other"
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     request.state.auth_type = getattr(request.state, "auth_type", "none")
     rid = new_request_id()
     token = request_id_var.set(rid)
+    reset_usage_context()
+    set_usage_context(operation=_operation_for_path(request.url.path, request.method), request_id=rid)
     start = time.perf_counter()
     status_code = 500
 
@@ -369,6 +382,7 @@ async def log_requests(request: Request, call_next):
         status_code = 500
         raise
     finally:
+        reset_usage_context()
         request_id_var.reset(token)
         if _should_log_request(request):
             asyncio.get_running_loop().run_in_executor(
@@ -434,6 +448,7 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
         raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
 
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
+    set_usage_context(user_id=memory_create.user_id, operation="add")
     try:
         response = get_memory_instance().add(messages=[m.model_dump() for m in memory_create.messages], **params)
         if response.get("results"):
@@ -529,6 +544,7 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
                 ", ".join(deprecated_keys),
                 ", ".join(f'"{k}": "..."' for k in deprecated_keys),
             )
+        set_usage_context(user_id=filters.get("user_id"), operation="search")
         params = {}
         if search_req.top_k is not None:
             params["top_k"] = search_req.top_k
@@ -623,3 +639,99 @@ def reset_memory(_auth=Depends(require_admin)):
 def home():
     """Redirect to the OpenAPI documentation."""
     return RedirectResponse(url="/docs")
+
+
+USAGE_GROUPINGS = {"day", "month", "user", "operation", "model"}
+
+
+@app.get("/usage/stats", summary="Token usage statistics")
+def usage_stats(
+    group_by: str = Query("day"),
+    days: int = Query(30, ge=1, le=3650),
+    model_type: Optional[str] = Query(None),
+    _auth=Depends(verify_auth),
+):
+    """按天/月/用户/操作/模型聚合记忆系统的 token 消耗（LLM、嵌入、重排）。"""
+    if group_by not in USAGE_GROUPINGS:
+        raise HTTPException(status_code=400, detail=f"group_by must be one of {sorted(USAGE_GROUPINGS)}")
+
+    from datetime import datetime, timedelta, timezone as _timezone
+
+    from models import TokenUsage
+
+    session = SessionLocal()
+    try:
+        # 按北京时间切分天/月，避免 UTC 造成跨日偏移
+        local_time = func.timezone("Asia/Shanghai", TokenUsage.created_at)
+        if group_by == "day":
+            key_expr = func.to_char(local_time, "YYYY-MM-DD")
+        elif group_by == "month":
+            key_expr = func.to_char(local_time, "YYYY-MM")
+        elif group_by == "user":
+            key_expr = func.coalesce(TokenUsage.user_id, "(未标注)")
+        elif group_by == "operation":
+            key_expr = func.coalesce(func.nullif(TokenUsage.operation, ""), "(未标注)")
+        else:
+            key_expr = TokenUsage.model_type
+
+        since = datetime.now(_timezone.utc) - timedelta(days=days)
+        grouped = select(
+            key_expr.label("key"),
+            TokenUsage.model_type.label("model_type"),
+            func.coalesce(func.sum(TokenUsage.prompt_tokens), 0).label("prompt_tokens"),
+            func.coalesce(func.sum(TokenUsage.completion_tokens), 0).label("completion_tokens"),
+            func.coalesce(func.sum(TokenUsage.total_tokens), 0).label("total_tokens"),
+            func.count().label("calls"),
+        ).where(TokenUsage.created_at >= since)
+        if model_type:
+            grouped = grouped.where(TokenUsage.model_type == model_type)
+        grouped = grouped.group_by(key_expr, TokenUsage.model_type).order_by(key_expr)
+        rows = [dict(row._mapping) for row in session.execute(grouped)]
+
+        totals_row = session.execute(
+            select(
+                func.coalesce(func.sum(TokenUsage.prompt_tokens), 0),
+                func.coalesce(func.sum(TokenUsage.completion_tokens), 0),
+                func.coalesce(func.sum(TokenUsage.total_tokens), 0),
+                func.count(),
+            ).where(TokenUsage.created_at >= since)
+        ).one()
+
+        by_model = [
+            {
+                "model_type": row.model_type,
+                "model_name": row.model_name or "",
+                "calls": int(row.calls),
+                "prompt_tokens": int(row.prompt_tokens),
+                "completion_tokens": int(row.completion_tokens),
+                "total_tokens": int(row.total_tokens),
+            }
+            for row in session.execute(
+                select(
+                    TokenUsage.model_type,
+                    func.max(TokenUsage.model_name).label("model_name"),
+                    func.count().label("calls"),
+                    func.coalesce(func.sum(TokenUsage.prompt_tokens), 0).label("prompt_tokens"),
+                    func.coalesce(func.sum(TokenUsage.completion_tokens), 0).label("completion_tokens"),
+                    func.coalesce(func.sum(TokenUsage.total_tokens), 0).label("total_tokens"),
+                )
+                .where(TokenUsage.created_at >= since)
+                .group_by(TokenUsage.model_type)
+                .order_by(func.sum(TokenUsage.total_tokens).desc())
+            )
+        ]
+    finally:
+        session.close()
+
+    return {
+        "group_by": group_by,
+        "days": days,
+        "rows": rows,
+        "totals": {
+            "prompt_tokens": int(totals_row[0]),
+            "completion_tokens": int(totals_row[1]),
+            "total_tokens": int(totals_row[2]),
+            "calls": int(totals_row[3]),
+        },
+        "by_model": by_model,
+    }

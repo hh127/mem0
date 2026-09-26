@@ -8,6 +8,7 @@ import {
   ChevronDown,
   FolderInput,
   GalleryVerticalEnd,
+  Gauge,
   KeyRound,
   Settings,
   Tags,
@@ -74,6 +75,12 @@ export function MainNav({
                     url: "/dashboard/memories",
                     icon: GalleryVerticalEnd,
                     active: pathname === "/dashboard/memories",
+                  },
+                  {
+                    title: "用量",
+                    url: "/dashboard/usage",
+                    icon: Gauge,
+                    active: pathname === "/dashboard/usage",
                   },
                   {
                     title: "实体",
