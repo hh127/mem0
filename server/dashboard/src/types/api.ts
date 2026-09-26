@@ -5,6 +5,8 @@ export interface Memory {
   agent_id?: string;
   created_at?: string;
   updated_at?: string;
+  /** 仅搜索结果返回：语义相关度（越大越相关） */
+  score?: number;
 }
 
 export interface ApiKey {
