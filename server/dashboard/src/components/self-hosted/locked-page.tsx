@@ -41,18 +41,18 @@ export function LockedPage({
         <CardContent className="flex flex-col sm:flex-row items-center gap-4 py-6">
           <div className="flex-1">
             <p className="text-sm font-medium">
-              This feature is available in Mem0 Cloud and Enterprise.
+              此功能仅在 Mem0 云端和企业版中可用。
             </p>
           </div>
           <div className="flex gap-3">
             <Button variant="default" asChild>
               <a href={cloudUrl} target="_blank" rel="noopener noreferrer">
-                Start free on Cloud
+                免费试用云服务
               </a>
             </Button>
             <Button variant="outline" asChild>
               <a href={salesUrl} target="_blank" rel="noopener noreferrer">
-                Talk to sales
+                联系销售
               </a>
             </Button>
           </div>

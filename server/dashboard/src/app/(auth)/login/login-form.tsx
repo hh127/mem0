@@ -52,7 +52,7 @@ export default function LoginForm() {
     e.preventDefault();
     setError("");
     if (!emailValid) {
-      setError("Enter a valid email address.");
+      setError("请输入有效的邮箱地址。");
       return;
     }
     setSubmitting(true);
@@ -60,7 +60,7 @@ export default function LoginForm() {
       await login(email, password);
       router.push(searchParams.get("next") || "/dashboard/requests");
     } catch (err) {
-      setError(getErrorMessage(err, "Login failed"));
+      setError(getErrorMessage(err, "登录失败"));
     } finally {
       setSubmitting(false);
     }
@@ -85,7 +85,7 @@ export default function LoginForm() {
             )}
           </div>
           <h1 className="text-2xl font-semibold text-onSurface-default-primary text-center mb-6 font-fustat">
-            Sign in to Mem0
+            登录 Mem0
           </h1>
           <div className="flex flex-col gap-4 border p-8 border-memBorder-primary rounded-xl">
             {error && (
@@ -95,7 +95,7 @@ export default function LoginForm() {
             )}
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
               <div className="space-y-1.5">
-                <Label htmlFor="login-email">Email</Label>
+                <Label htmlFor="login-email">邮箱</Label>
                 <Input
                   id="login-email"
                   type="email"
@@ -107,7 +107,7 @@ export default function LoginForm() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="login-password">Password</Label>
+                <Label htmlFor="login-password">密码</Label>
                 <Input
                   id="login-password"
                   type="password"
@@ -123,7 +123,7 @@ export default function LoginForm() {
                 size="lg"
                 className="w-full"
               >
-                {submitting ? "Signing in..." : "Sign in"}
+                {submitting ? "正在登录…" : "登录"}
               </Button>
             </form>
             <Dialog>
@@ -132,12 +132,12 @@ export default function LoginForm() {
                   type="button"
                   className="text-xs text-onSurface-default-tertiary hover:text-onSurface-default-primary underline underline-offset-4 self-center"
                 >
-                  Forgot password?
+                  忘记密码？
                 </button>
               </DialogTrigger>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Reset your admin password</DialogTitle>
+                  <DialogTitle>重置管理员密码</DialogTitle>
                   <DialogDescription>
                     Run this command on the server host. It overwrites the
                     existing password; anyone already signed in stays signed in
@@ -195,7 +195,7 @@ export default function LoginForm() {
             </div>
           </div>
           <div className="flex w-full flex-col items-center gap-3">
-            <p className="typo-body text-white">Trusted by 100k+ Developers</p>
+            <p className="typo-body text-white">10 万+ 开发者信赖之选</p>
             <div className="flex items-center justify-center gap-8 text-white">
               <div className="h-6 shrink-0">
                 <Image

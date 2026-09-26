@@ -12,11 +12,11 @@ function WebhooksMockup() {
     <Card className="border-memBorder-primary">
       <CardContent className="p-6 space-y-4">
         <div className="space-y-2">
-          <Label>Endpoint URL</Label>
+          <Label>端点 URL</Label>
           <Input placeholder="https://your-app.com/webhooks/mem0" disabled />
         </div>
         <div className="space-y-2">
-          <Label>Events</Label>
+          <Label>事件</Label>
           <div className="flex flex-col gap-2">
             {[
               "memory.created",
@@ -32,10 +32,10 @@ function WebhooksMockup() {
           </div>
         </div>
         <div className="space-y-2">
-          <Label>Signing Secret</Label>
+          <Label>签名密钥</Label>
           <Input placeholder="whsec_..." disabled type="password" />
         </div>
-        <Button disabled>Create Webhook</Button>
+        <Button disabled>创建 Webhook</Button>
       </CardContent>
     </Card>
   );
@@ -45,7 +45,7 @@ export default function WebhooksPage() {
   return (
     <LockedPage
       title="Webhooks"
-      description="Get notified when memories are created, updated, or deleted."
+      description="当记忆被创建、更新或删除时收到通知。"
       previewContent={<WebhooksMockup />}
       utmMedium="dashboard-locked-webhooks"
     />

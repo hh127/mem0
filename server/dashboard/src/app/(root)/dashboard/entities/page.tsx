@@ -29,7 +29,7 @@ export default function EntitiesPage() {
       const res = await api.get<Entity[]>(ENTITY_ENDPOINTS.BASE);
       return res.data ?? [];
     },
-    { errorToast: "Failed to load entities", initialData: [] },
+    { errorToast: "实体加载失败", initialData: [] },
   );
 
   const handleDelete = async () => {
@@ -38,12 +38,12 @@ export default function EntitiesPage() {
       await api.delete(
         ENTITY_ENDPOINTS.BY_ID(entityToDelete.type, entityToDelete.id),
       );
-      toast({ title: "Entity deleted", variant: "success" });
+      toast({ title: "实体已删除", variant: "success" });
       setEntityToDelete(null);
       void refetch();
     } catch (error) {
       toast({
-        title: "Failed to delete entity",
+        title: "实体删除失败",
         description: getErrorMessage(error),
         variant: "destructive",
       });
@@ -53,7 +53,7 @@ export default function EntitiesPage() {
   const columns = [
     {
       key: "type" as keyof Entity,
-      label: "Type",
+      label: "类型",
       width: 100,
       render: (value: Entity["type"]) => (
         <Badge variant="outline" className="capitalize">
@@ -71,13 +71,13 @@ export default function EntitiesPage() {
     },
     {
       key: "total_memories" as keyof Entity,
-      label: "Memories",
+      label: "记忆",
       width: 100,
       align: "right" as const,
     },
     {
       key: "updated_at" as keyof Entity,
-      label: "Last Active",
+      label: "最近活跃",
       width: 140,
       render: (value: string | null) =>
         value ? format(new Date(value), "MMM d, yyyy") : "--",
@@ -101,13 +101,13 @@ export default function EntitiesPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold font-fustat">Entities</h1>
+      <h1 className="text-xl font-semibold font-fustat">实体</h1>
 
       {isLoading ? (
         <TableSkeleton rows={5} columns={5} />
       ) : entities.length === 0 ? (
         <EmptyState
-          title="No entities yet"
+          title="暂无实体"
           description="Entities appear once memories are stored with a user_id, agent_id, or run_id."
         />
       ) : (
@@ -124,7 +124,7 @@ export default function EntitiesPage() {
         isOpen={!!entityToDelete}
         onClose={() => setEntityToDelete(null)}
         onConfirm={handleDelete}
-        title="Delete entity"
+        title="删除实体"
         description="All memories associated with this entity will be permanently removed. This cannot be undone."
         itemName={entityToDelete?.id ?? ""}
         confirmButtonText="Delete"

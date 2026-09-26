@@ -50,7 +50,7 @@ export default function MemoriesPage() {
       const raw = res.data?.results ?? res.data ?? [];
       return Array.isArray(raw) ? raw : [];
     },
-    { errorToast: "Failed to load memories", initialData: [] },
+    { errorToast: "记忆加载失败", initialData: [] },
   );
 
   const totalPages = Math.ceil(memories.length / PAGE_SIZE);
@@ -63,13 +63,13 @@ export default function MemoriesPage() {
     if (!memoryToDelete) return;
     try {
       await api.delete(MEMORY_ENDPOINTS.BY_ID(memoryToDelete.id));
-      toast({ title: "Memory deleted", variant: "success" });
+      toast({ title: "记忆已删除", variant: "success" });
       if (selectedMemory?.id === memoryToDelete.id) setSelectedMemory(null);
       setMemoryToDelete(null);
       void refetch();
     } catch (error) {
       toast({
-        title: "Failed to delete memory",
+        title: "记忆删除失败",
         description: getErrorMessage(error),
         variant: "destructive",
       });
@@ -79,17 +79,17 @@ export default function MemoriesPage() {
   const columns = [
     {
       key: "memory" as keyof Memory,
-      label: "Content",
+      label: "内容",
       width: 400,
       render: (value: string) => (
         <span className="line-clamp-2 text-sm">{value}</span>
       ),
     },
-    { key: "user_id" as keyof Memory, label: "User", width: 100 },
-    { key: "agent_id" as keyof Memory, label: "Agent", width: 100 },
+    { key: "user_id" as keyof Memory, label: "用户", width: 100 },
+    { key: "agent_id" as keyof Memory, label: "代理", width: 100 },
     {
       key: "created_at" as keyof Memory,
-      label: "Created",
+      label: "创建时间",
       width: 120,
       render: (value: string) =>
         value ? format(new Date(value), "MMM d, yyyy") : "--",
@@ -98,13 +98,13 @@ export default function MemoriesPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold font-fustat">Memories</h1>
+      <h1 className="text-xl font-semibold font-fustat">记忆</h1>
 
       {memories.length >= MEMORY_FETCH_LIMIT && (
         <UpgradeBanner
           id="memories-1k"
           message="1,000+ memories stored. Categories can help organize them."
-          ctaLabel="Explore Cloud"
+          ctaLabel="了解云服务"
           ctaUrl="https://app.mem0.ai?utm_source=oss&utm_medium=dashboard-memories"
           variant="cloud"
         />
@@ -112,7 +112,7 @@ export default function MemoriesPage() {
 
       <div className="flex gap-3">
         <Input
-          placeholder="Filter by User ID (optional)"
+          placeholder="按用户 ID 筛选（可选）"
           value={userId}
           onChange={(e) => setUserId(e.target.value)}
           onKeyDown={(e) => {
@@ -129,14 +129,14 @@ export default function MemoriesPage() {
         <TableSkeleton rows={5} columns={4} />
       ) : memories.length === 0 ? (
         <EmptyState
-          title="No memories yet"
+          title="暂无记忆"
           description="Create your first memory by sending a POST /memories request."
         >
           <pre className="text-xs text-left bg-surface-default-secondary p-3 rounded font-mono overflow-x-auto mt-3 max-w-lg">
             {`curl -X POST ${apiUrl}/memories \\
   -H "X-API-Key: <your-key>" \\
   -H "Content-Type: application/json" \\
-  -d '{"messages": [{"role": "user", "content": "I like hiking"}], "user_id": "alice"}'`}
+  -d '{"messages": [{"role": "user", "content": "我喜欢徒步"}], "user_id": "alice"}'`}
           </pre>
           <a
             href="https://docs.mem0.ai/open-source/features/rest-api#memory-operations"
@@ -144,7 +144,7 @@ export default function MemoriesPage() {
             rel="noopener noreferrer"
             className="text-xs text-onSurface-default-tertiary underline underline-offset-4 hover:text-onSurface-default-primary mt-2"
           >
-            REST API reference
+            REST API 文档
           </a>
         </EmptyState>
       ) : (
@@ -176,7 +176,7 @@ export default function MemoriesPage() {
                   disabled={page === 0}
                   onClick={() => setPage((p) => p - 1)}
                 >
-                  Previous
+                  上一页
                 </Button>
                 <Button
                   variant="outline"
@@ -184,7 +184,7 @@ export default function MemoriesPage() {
                   disabled={page >= totalPages - 1}
                   onClick={() => setPage((p) => p + 1)}
                 >
-                  Next
+                  下一页
                 </Button>
               </div>
             </div>
@@ -200,16 +200,16 @@ export default function MemoriesPage() {
       >
         <SheetContent className="sm:max-w-md">
           <SheetHeader>
-            <SheetTitle>Memory Detail</SheetTitle>
+            <SheetTitle>记忆详情</SheetTitle>
             <SheetDescription className="sr-only">
-              View memory content and metadata
+              查看记忆内容和元数据
             </SheetDescription>
           </SheetHeader>
           {selectedMemory && (
             <div className="mt-6 space-y-4">
               <div className="space-y-1">
                 <Label className="text-xs text-onSurface-default-tertiary">
-                  Content
+                  内容
                 </Label>
                 <p className="text-sm">{selectedMemory.memory}</p>
               </div>
@@ -225,7 +225,7 @@ export default function MemoriesPage() {
                 {selectedMemory.user_id && (
                   <div className="space-y-1">
                     <Label className="text-xs text-onSurface-default-tertiary">
-                      User
+                      用户
                     </Label>
                     <p className="text-sm">{selectedMemory.user_id}</p>
                   </div>
@@ -233,7 +233,7 @@ export default function MemoriesPage() {
                 {selectedMemory.agent_id && (
                   <div className="space-y-1">
                     <Label className="text-xs text-onSurface-default-tertiary">
-                      Agent
+                      代理
                     </Label>
                     <p className="text-sm">{selectedMemory.agent_id}</p>
                   </div>
@@ -241,7 +241,7 @@ export default function MemoriesPage() {
                 {selectedMemory.created_at && (
                   <div className="space-y-1">
                     <Label className="text-xs text-onSurface-default-tertiary">
-                      Created
+                      创建时间
                     </Label>
                     <p className="text-sm">
                       {new Date(selectedMemory.created_at).toLocaleString()}
@@ -256,7 +256,7 @@ export default function MemoriesPage() {
                 onClick={() => setMemoryToDelete(selectedMemory)}
               >
                 <Trash2 className="size-3.5 mr-1" />
-                Delete memory
+                删除记忆
               </Button>
             </div>
           )}
@@ -267,7 +267,7 @@ export default function MemoriesPage() {
         isOpen={!!memoryToDelete}
         onClose={() => setMemoryToDelete(null)}
         onConfirm={handleDelete}
-        title="Delete memory"
+        title="删除记忆"
         description="This memory will be permanently removed. This cannot be undone."
         itemName={memoryToDelete?.id ?? ""}
         confirmButtonText="Delete"

@@ -115,7 +115,7 @@ export default function NavWrapper() {
                   >
                     <Link href="/dashboard/settings">
                       <Settings className="size-4 mr-2" />
-                      Settings
+                      设置
                     </Link>
                   </DropdownMenuItem>
                   <DropdownMenuSeparator className="bg-memBorder-primary" />
@@ -124,7 +124,7 @@ export default function NavWrapper() {
                     className="typo-body-sm text-onSurface-default-primary hover:bg-surface-default-tertiary-hover focus:bg-surface-default-tertiary-hover cursor-pointer"
                   >
                     <LogOut className="size-4 mr-2" />
-                    Log out
+                    退出登录
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -146,7 +146,7 @@ export default function NavWrapper() {
             onClick={handleToggle}
             className="cursor-pointer text-onSurface-default-tertiary hover:text-onSurface-default-secondary"
             aria-label={
-              isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
+              isSidebarCollapsed ? "展开侧边栏" : "收起侧边栏"
             }
           >
             <PanelRight className="size-4" />
@@ -165,7 +165,7 @@ export default function NavWrapper() {
                 <HelpCircle className="size-4 shrink-0" />
               </a>
             </TooltipTrigger>
-            <TooltipContent>Documentation</TooltipContent>
+            <TooltipContent>文档</TooltipContent>
           </Tooltip>
         </div>
       </div>

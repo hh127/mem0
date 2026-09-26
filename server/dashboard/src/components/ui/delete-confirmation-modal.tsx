@@ -49,12 +49,12 @@ const DeleteConfirmationModal = ({
 
         <div className="space-y-4">
           <p className="text-sm text-[#565553]">
-            Please type <span className="font-bold">{itemName}</span> to
+            请输入 <span className="font-bold">{itemName}</span> to
             confirm.
           </p>
           <Input
             type="text"
-            placeholder="Enter name to confirm"
+            placeholder="输入名称以确认"
             value={confirmationText}
             onChange={(e) => setConfirmationText(e.target.value)}
             className="w-full"
@@ -63,7 +63,7 @@ const DeleteConfirmationModal = ({
 
         <div className="flex justify-end gap-2 mt-6">
           <Button onClick={handleClose} variant="outline">
-            Cancel
+            取消
           </Button>
           <Button
             onClick={handleConfirm}

@@ -3,7 +3,7 @@ import { DashboardClientLayout } from "./dashboard-client-layout";
 
 export const metadata: Metadata = {
   title: "Dashboard | Mem0",
-  description: "Mem0 Dashboard",
+  description: "Mem0 控制台",
 };
 
 export default function DashboardLayout({

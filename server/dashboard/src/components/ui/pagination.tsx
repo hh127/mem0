@@ -74,7 +74,7 @@ const PaginationPrevious = ({
   ...props
 }: React.ComponentProps<typeof PaginationLink> & { isDisabled?: boolean }) => (
   <PaginationLink
-    aria-label="Go to previous page"
+    aria-label="上一页"
     size="default"
     className={cn(
       "gap-1 pl-2.5 cursor-pointer",
@@ -91,7 +91,7 @@ const PaginationPrevious = ({
     {...props}
   >
     <ChevronLeftIcon className="size-4" />
-    <span>Previous</span>
+    <span>上一页</span>
   </PaginationLink>
 );
 
@@ -102,7 +102,7 @@ const PaginationNext = ({
   ...props
 }: React.ComponentProps<typeof PaginationLink> & { isDisabled?: boolean }) => (
   <PaginationLink
-    aria-label="Go to next page"
+    aria-label="下一页"
     size="default"
     className={cn(
       "gap-1 pr-2.5 cursor-pointer",
@@ -118,7 +118,7 @@ const PaginationNext = ({
     }}
     {...props}
   >
-    <span>Next</span>
+    <span>下一页</span>
     <ChevronRightIcon className="size-4" />
   </PaginationLink>
 );
@@ -133,7 +133,7 @@ const PaginationEllipsis = ({
     {...props}
   >
     <DotsHorizontalIcon className="size-4" />
-    <span className="sr-only">More pages</span>
+    <span className="sr-only">更多页</span>
   </span>
 );
 PaginationEllipsis.displayName = "PaginationEllipsis";

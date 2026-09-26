@@ -31,7 +31,7 @@ export async function POST() {
   const refreshToken = cookieStore.get(COOKIE_NAME)?.value;
 
   if (!refreshToken) {
-    return NextResponse.json({ error: "No refresh token" }, { status: 401 });
+    return NextResponse.json({ error: "无刷新令牌" }, { status: 401 });
   }
 
   const res = await fetch(`${getServerApiUrl()}${AUTH_ENDPOINTS.REFRESH}`, {
@@ -43,7 +43,7 @@ export async function POST() {
   if (!res.ok) {
     // Refresh token is invalid — clear cookie
     cookieStore.delete(COOKIE_NAME);
-    return NextResponse.json({ error: "Refresh failed" }, { status: 401 });
+    return NextResponse.json({ error: "刷新失败" }, { status: 401 });
   }
 
   const data = await res.json();

@@ -59,24 +59,24 @@ export function MainNav({
               <div className="flex flex-col gap-0">
                 {!isSidebarCollapsed && (
                   <SidebarGroupLabel className="mb-0">
-                    ACTIVITY
+                    活动
                   </SidebarGroupLabel>
                 )}
                 {[
                   {
-                    title: "Requests",
+                    title: "请求日志",
                     url: "/dashboard/requests",
                     icon: Activity,
                     active: pathname === "/dashboard/requests",
                   },
                   {
-                    title: "Memories",
+                    title: "记忆",
                     url: "/dashboard/memories",
                     icon: GalleryVerticalEnd,
                     active: pathname === "/dashboard/memories",
                   },
                   {
-                    title: "Entities",
+                    title: "实体",
                     url: "/dashboard/entities",
                     icon: Users,
                     active: pathname === "/dashboard/entities",
@@ -118,7 +118,7 @@ export function MainNav({
                 {!isSidebarCollapsed && (
                   <CollapsibleTrigger asChild>
                     <SidebarGroupLabel className="cursor-pointer mb-0">
-                      CLOUD FEATURES
+                      云功能
                       <ChevronDown
                         className={cn(
                           "size-3 transition-transform duration-200",
@@ -131,7 +131,7 @@ export function MainNav({
                 <CollapsibleContent className="flex flex-col gap-0">
                   {[
                     {
-                      title: "Categories",
+                      title: "分类",
                       url: "/dashboard/categories",
                       icon: Tags,
                     },
@@ -141,12 +141,12 @@ export function MainNav({
                       icon: WebhookIcon,
                     },
                     {
-                      title: "Analytics",
+                      title: "统计分析",
                       url: "/dashboard/analytics",
                       icon: ChartLine,
                     },
                     {
-                      title: "Export",
+                      title: "导出",
                       url: "/dashboard/export",
                       icon: FolderInput,
                     },
@@ -193,24 +193,24 @@ export function MainNav({
               <div className="flex flex-col gap-0">
                 {!isSidebarCollapsed && (
                   <SidebarGroupLabel className="mb-0">
-                    ACCOUNT
+                    账户
                   </SidebarGroupLabel>
                 )}
                 {[
                   {
-                    title: "API Keys",
+                    title: "API 密钥",
                     url: "/dashboard/api-keys",
                     icon: KeyRound,
                     active: pathname === "/dashboard/api-keys",
                   },
                   {
-                    title: "Configuration",
+                    title: "配置",
                     url: "/dashboard/configuration",
                     icon: Wrench,
                     active: pathname === "/dashboard/configuration",
                   },
                   {
-                    title: "Settings",
+                    title: "设置",
                     url: "/dashboard/settings",
                     icon: Settings,
                     active: pathname === "/dashboard/settings",
