@@ -1,14 +1,22 @@
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+# mem0 官方遥测默认关闭：库在自己的模块加载时读取 MEM0_TELEMETRY，所以必须在
+# `from mem0 import ...`（经 server_state 间接导入）之前把它落进 os.environ。
+# .env 里显式写 MEM0_TELEMETRY=true 仍可打开（load_dotenv 先执行，setdefault 不覆盖已有值）。
+os.environ.setdefault("MEM0_TELEMETRY", "false")
+
 import asyncio
 import json
 import logging
-import os
 import time
 from typing import Any, Dict, List, Optional
 
 import telemetry
 from auth import ADMIN_API_KEY, AUTH_DISABLED, JWT_SECRET, require_admin, verify_auth
 from db import SessionLocal
-from dotenv import load_dotenv
 from errors import (
     UpstreamError,
     install_request_id_logging,
@@ -40,9 +48,13 @@ from slowapi.errors import RateLimitExceeded
 from sqlalchemy import func, select
 
 from mem0.exceptions import ValidationError as Mem0ValidationError
-from usage_hooks import install_usage_hooks, reset_usage_context, set_usage_context
-
-load_dotenv()
+from usage_hooks import (
+    install_usage_hooks,
+    reset_usage_context,
+    resume_usage_recording,
+    set_usage_context,
+    suppress_usage_recording,
+)
 
 install_request_id_logging()
 install_usage_hooks()
@@ -355,7 +367,7 @@ def _persist_request_log(method: str, path: str, status_code: int, latency_ms: f
 
 
 def _operation_for_path(path: str, method: str) -> str:
-    """æè¯·æ±æ å°æç¨éç»è®¡éçæä½ç»´åº¦ã"""
+    """把请求映射成用量统计里的操作维度。"""
     if path.startswith("/memories"):
         return {"POST": "add", "PUT": "update", "DELETE": "delete"}.get(method, "read")
     if path.startswith("/search"):
@@ -412,6 +424,106 @@ def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
     _validate_bundled_providers(config)
     update_config(config)
     return {"message": "Configuration set successfully"}
+
+
+TEST_TARGETS = ("llm", "embedder", "reranker")
+
+
+class ConfigureTestRequest(BaseModel):
+    target: str = Field(..., description="Which model to test: llm | embedder | reranker.")
+    config: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Optional 'llm'/'embedder'/'reranker' section to test instead of the live one "
+            "({provider, config}). Missing fields fall back to the effective config, so a "
+            "half-filled form (e.g. only a new API key) can be tested before saving."
+        ),
+    )
+
+
+def _merge_section(base: Any, override: Any) -> Dict[str, Any]:
+    """Deep-merge a partial section over the effective one (never drops untouched fields)."""
+    merged = dict(base) if isinstance(base, dict) else {}
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_section(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _shorten(value: Any, limit: int = 120) -> str:
+    text = "" if value is None else str(value).strip().replace("\n", " ")
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def _run_model_probe(target: str, provider: str, config: Dict[str, Any]) -> str:
+    """Make one real call to the given model and describe what came back."""
+    if target == "llm":
+        from mem0.utils.factory import LlmFactory
+
+        llm = LlmFactory.create(provider, config)
+        reply = llm.generate_response(messages=[{"role": "user", "content": "ping"}])
+        return f"模型回复：{_shorten(reply) or '(空)'}"
+
+    if target == "embedder":
+        from mem0.utils.factory import EmbedderFactory
+
+        embedder = EmbedderFactory.create(provider, config, None)
+        vector = embedder.embed("连通性测试", "search")
+        return f"返回向量维度 {len(vector)}"
+
+    from mem0.utils.factory import RerankerFactory
+
+    reranker = RerankerFactory.create(provider, config)
+    ranked = reranker.rerank(
+        "今天天气怎么样",
+        [{"memory": "今天晴，气温 22 度"}, {"memory": "用户偏好简洁的回复"}],
+    )
+    score = (ranked[0] if ranked else {}).get("rerank_score")
+    return f"返回 {len(ranked)} 条，首位得分 {score}"
+
+
+@app.post("/configure/test", summary="Test one of the configured models for real")
+def test_config_model(req: ConfigureTestRequest, _auth=Depends(require_admin)):
+    """用真实调用探测 LLM / 嵌入 / 重排是否可用。
+
+    只读不写：不发记忆、不改配置，探测期间的模型调用不计入用量统计。
+    """
+    target = (req.target or "").strip().lower()
+    if target not in TEST_TARGETS:
+        raise HTTPException(status_code=400, detail=f"target must be one of {list(TEST_TARGETS)}")
+
+    section = _merge_section(get_current_config().get(target), req.config)
+    provider = str(section.get("provider") or "").strip()
+    raw_config = section.get("config")
+    config = dict(raw_config) if isinstance(raw_config, dict) else {}
+    if not provider:
+        raise HTTPException(status_code=400, detail=f"{target} 尚未配置提供商（provider）")
+
+    result: Dict[str, Any] = {
+        "target": target,
+        "provider": provider,
+        "model": str(config.get("model") or ""),
+        "ok": False,
+        "latency_ms": 0,
+        "detail": "",
+        "error": None,
+    }
+
+    suppress_usage_recording()
+    started = time.perf_counter()
+    try:
+        result["detail"] = _run_model_probe(target, provider, config)
+        result["ok"] = True
+    except Exception as exc:
+        logging.warning("configure test failed for %s: %s", target, exc)
+        result["error"] = _shorten(exc, 400)
+    finally:
+        result["latency_ms"] = int((time.perf_counter() - started) * 1000)
+        resume_usage_recording()
+
+    return result
 
 
 @app.post("/generate-instructions", summary="Generate custom instructions from a use case")
@@ -681,6 +793,7 @@ def usage_stats(
             func.coalesce(func.sum(TokenUsage.prompt_tokens), 0).label("prompt_tokens"),
             func.coalesce(func.sum(TokenUsage.completion_tokens), 0).label("completion_tokens"),
             func.coalesce(func.sum(TokenUsage.total_tokens), 0).label("total_tokens"),
+            func.coalesce(func.sum(TokenUsage.cached_tokens), 0).label("prompt_cached_tokens"),
             func.count().label("calls"),
         ).where(TokenUsage.created_at >= since)
         if model_type:
@@ -693,6 +806,7 @@ def usage_stats(
                 func.coalesce(func.sum(TokenUsage.prompt_tokens), 0),
                 func.coalesce(func.sum(TokenUsage.completion_tokens), 0),
                 func.coalesce(func.sum(TokenUsage.total_tokens), 0),
+                func.coalesce(func.sum(TokenUsage.cached_tokens), 0),
                 func.count(),
             ).where(TokenUsage.created_at >= since)
         ).one()
@@ -705,6 +819,7 @@ def usage_stats(
                 "prompt_tokens": int(row.prompt_tokens),
                 "completion_tokens": int(row.completion_tokens),
                 "total_tokens": int(row.total_tokens),
+                "prompt_cached_tokens": int(row.prompt_cached_tokens),
             }
             for row in session.execute(
                 select(
@@ -714,6 +829,7 @@ def usage_stats(
                     func.coalesce(func.sum(TokenUsage.prompt_tokens), 0).label("prompt_tokens"),
                     func.coalesce(func.sum(TokenUsage.completion_tokens), 0).label("completion_tokens"),
                     func.coalesce(func.sum(TokenUsage.total_tokens), 0).label("total_tokens"),
+                    func.coalesce(func.sum(TokenUsage.cached_tokens), 0).label("prompt_cached_tokens"),
                 )
                 .where(TokenUsage.created_at >= since)
                 .group_by(TokenUsage.model_type)
@@ -731,7 +847,8 @@ def usage_stats(
             "prompt_tokens": int(totals_row[0]),
             "completion_tokens": int(totals_row[1]),
             "total_tokens": int(totals_row[2]),
-            "calls": int(totals_row[3]),
+            "prompt_cached_tokens": int(totals_row[3]),
+            "calls": int(totals_row[4]),
         },
         "by_model": by_model,
     }

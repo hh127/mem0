@@ -41,6 +41,8 @@ export interface UsageStatRow {
   key: string;
   model_type: string;
   prompt_tokens: number;
+  /** prompt_tokens 中命中服务商缓存的部分 */
+  prompt_cached_tokens: number;
   completion_tokens: number;
   total_tokens: number;
   calls: number;
@@ -51,6 +53,7 @@ export interface UsageModelSummary {
   model_name: string;
   calls: number;
   prompt_tokens: number;
+  prompt_cached_tokens: number;
   completion_tokens: number;
   total_tokens: number;
 }
@@ -61,11 +64,22 @@ export interface UsageStatsResponse {
   rows: UsageStatRow[];
   totals: {
     prompt_tokens: number;
+    prompt_cached_tokens: number;
     completion_tokens: number;
     total_tokens: number;
     calls: number;
   };
   by_model: UsageModelSummary[];
+}
+
+export interface ConfigureTestResult {
+  target: "llm" | "embedder" | "reranker";
+  provider: string;
+  model: string;
+  ok: boolean;
+  latency_ms: number;
+  detail: string;
+  error: string | null;
 }
 
 export interface Entity {

@@ -93,6 +93,10 @@ class TokenUsage(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # prompt 里命中服务商缓存（前缀缓存）的 token 数，属于 prompt_tokens 的一部分。
+    cached_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # prompt 前缀指纹：服务商不回缓存字段时，用它判断窗口内是否出现过同一 prompt。
+    prompt_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     # add | search | update | delete | other
     operation: Mapped[str] = mapped_column(String(32), default="", index=True)
     user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)

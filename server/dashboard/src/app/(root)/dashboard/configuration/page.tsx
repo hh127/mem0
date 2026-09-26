@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { PlayCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -27,11 +28,72 @@ import {
 } from "@/utils/self-hosted-config";
 import { useAuth } from "@/hooks/use-auth";
 import { useApiQuery } from "@/hooks/use-api-query";
+import type { ConfigureTestResult } from "@/types/api";
 
 type BundledProviders = {
   llm: string[];
   embedder: string[];
 };
+
+type TestTarget = "llm" | "embedder" | "reranker";
+
+type TestState = {
+  loading: boolean;
+  result: ConfigureTestResult | null;
+};
+
+const EMPTY_TEST_STATE: Record<TestTarget, TestState> = {
+  llm: { loading: false, result: null },
+  embedder: { loading: false, result: null },
+  reranker: { loading: false, result: null },
+};
+
+/** 「测试」按钮 + 结果行：一次真实调用，结果直接显示在卡片里。 */
+function ModelTest({
+  target,
+  state,
+  disabled,
+  onTest,
+}: {
+  target: TestTarget;
+  state: TestState;
+  disabled: boolean;
+  onTest: () => void;
+}) {
+  const { result } = state;
+  return (
+    <div className="space-y-2" data-target={target}>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        onClick={onTest}
+        disabled={disabled || state.loading}
+      >
+        <PlayCircle className={state.loading ? "animate-pulse" : undefined} />
+        {state.loading ? "测试中…" : "测试"}
+      </Button>
+      {result ? (
+        <div
+          className={
+            result.ok
+              ? "text-xs text-emerald-600 dark:text-emerald-400"
+              : "text-xs text-rose-600 dark:text-rose-400"
+          }
+        >
+          <span className="font-medium">
+            {result.ok ? "✓ 可用" : "✗ 不可用"}
+          </span>
+          <span className="ml-2 text-onSurface-default-tertiary">
+            {result.provider}
+            {result.model ? ` / ${result.model}` : ""} · {result.latency_ms} ms
+          </span>
+          <div className="mt-0.5 break-all">{result.ok ? result.detail : result.error}</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 export default function ConfigurationPage() {
   const { isAdmin } = useAuth();
@@ -51,6 +113,7 @@ export default function ConfigurationPage() {
   const [rerankerApiKey, setRerankerApiKey] = useState("");
   const [rerankerBaseUrl, setRerankerBaseUrl] = useState("");
   const [rerankerTopK, setRerankerTopK] = useState("");
+  const [tests, setTests] = useState<Record<TestTarget, TestState>>(EMPTY_TEST_STATE);
 
   const { data: config, isLoading: isPrefilling } = useApiQuery(
     async () => {
@@ -120,6 +183,33 @@ export default function ConfigurationPage() {
         : ""),
     );
   }, [config]);
+
+  const runTest = async (target: TestTarget, section: unknown) => {
+    setTests((prev) => ({ ...prev, [target]: { loading: true, result: null } }));
+    try {
+      const res = await api.post<ConfigureTestResult>(MEMORY_ENDPOINTS.CONFIGURE_TEST, {
+        target,
+        config: section,
+      });
+      setTests((prev) => ({ ...prev, [target]: { loading: false, result: res.data } }));
+    } catch (error) {
+      setTests((prev) => ({
+        ...prev,
+        [target]: {
+          loading: false,
+          result: {
+            target,
+            provider: "",
+            model: "",
+            ok: false,
+            latency_ms: 0,
+            detail: "",
+            error: getErrorMessage(error),
+          },
+        },
+      }));
+    }
+  };
 
   const handleSave = async () => {
     setIsSaving(true);
@@ -274,6 +364,24 @@ export default function ConfigurationPage() {
               />
             </div>
           </div>
+          <ModelTest
+            target="llm"
+            state={tests.llm}
+            disabled={!isAdmin}
+            onTest={() =>
+              void runTest(
+                "llm",
+                buildLlmConfig({
+                  provider: llmProvider,
+                  model: llmModel,
+                  apiKey: llmApiKey,
+                  baseUrl: llmBaseUrl,
+                  temperature: parseOptionalNumber(llmTemperature),
+                  maxTokens: parseOptionalNumber(llmMaxTokens),
+                }),
+              )
+            }
+          />
         </CardContent>
       </Card>
 
@@ -335,6 +443,22 @@ export default function ConfigurationPage() {
             换嵌入模型 = 换向量维度，历史记忆的向量对不上会导致搜索失效（当前 pgvector 为
             1024 维）。只换 LLM 没有这个问题。
           </p>
+          <ModelTest
+            target="embedder"
+            state={tests.embedder}
+            disabled={!isAdmin}
+            onTest={() =>
+              void runTest(
+                "embedder",
+                buildEmbedderConfig({
+                  provider: embedderProvider,
+                  model: embedderModel,
+                  apiKey: embedderApiKey,
+                  baseUrl: embedderBaseUrl,
+                }),
+              )
+            }
+          />
         </CardContent>
       </Card>
 
@@ -407,6 +531,23 @@ export default function ConfigurationPage() {
           <p className="text-xs text-onSurface-default-tertiary">
             重排序只在「搜索」时触发，写入记忆不会用到它。
           </p>
+          <ModelTest
+            target="reranker"
+            state={tests.reranker}
+            disabled={!isAdmin}
+            onTest={() =>
+              void runTest(
+                "reranker",
+                buildRerankerConfig({
+                  provider: rerankerProvider,
+                  model: rerankerModel,
+                  apiKey: rerankerApiKey,
+                  baseUrl: rerankerBaseUrl,
+                  topK: parseOptionalNumber(rerankerTopK),
+                }),
+              )
+            }
+          />
         </CardContent>
       </Card>
 

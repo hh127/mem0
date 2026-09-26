@@ -4,10 +4,10 @@
 - `onboarding_completed` — fires when the setup wizard reaches its final success state
   (so dashboard installs emit both; API-only installs emit only the first).
 
-Enabled by default (matching the mem0 OSS library). Opt out with `MEM0_TELEMETRY=false`.
-Fires to the same PostHog project the library uses. Shared properties: email domain,
-server version, and a randomly generated install UUID. `onboarding_completed` also
-carries the operator's freeform use-case string.
+**Disabled by default in this fork** (upstream opts in). Set `MEM0_TELEMETRY=true` to
+opt back in. Firing sends to the same PostHog project the mem0 library uses. Shared
+properties: email domain, server version, and a randomly generated install UUID.
+`onboarding_completed` also carries the operator's freeform use-case string.
 """
 
 import json
@@ -24,7 +24,8 @@ import mem0
 PROJECT_API_KEY = "phc_hgJkUVJFYtmaJqrvf6CYN67TIQ8yhXAkWzUn9AMU4yX"
 HOST = "https://us.i.posthog.com"
 
-ENABLED = os.environ.get("MEM0_TELEMETRY", "true").lower() not in {"0", "false", "no", "off"}
+# Default OFF: only an explicit MEM0_TELEMETRY=true/1/yes/on turns it back on.
+ENABLED = os.environ.get("MEM0_TELEMETRY", "false").strip().lower() in {"1", "true", "yes", "on"}
 STATE_PATH = Path(os.environ.get("MEM0_TELEMETRY_STATE_PATH", "/app/history/telemetry.json"))
 
 _lock = Lock()
@@ -73,7 +74,12 @@ def _get_client():
 
 def log_status() -> None:
     if ENABLED:
-        logging.info("telemetry: anonymous telemetry is enabled. Set MEM0_TELEMETRY=false to disable.")
+        logging.warning(
+            "telemetry: anonymous telemetry is ENABLED (MEM0_TELEMETRY=true). "
+            "Unset it or set MEM0_TELEMETRY=false to stop all outbound events."
+        )
+    else:
+        logging.info("telemetry: disabled (default in this fork); no events leave this host.")
 
 
 def _capture_once(email: str, event: str, state_key: str, extra: dict[str, Any] | None = None) -> None:

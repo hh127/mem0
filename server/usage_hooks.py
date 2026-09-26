@@ -16,7 +16,11 @@ operation，在各路由里补上 user_id（要读请求体，只能在路由内
 """
 
 import contextvars
+import hashlib
+import json
 import logging
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -24,6 +28,17 @@ logger = logging.getLogger(__name__)
 _usage_ctx: contextvars.ContextVar[dict] = contextvars.ContextVar(
     "mem0_usage_ctx", default={}
 )
+
+# 测试模型连通性等「非业务」调用不该污染用量统计：置位后 _record 直接丢弃。
+_suppressed: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "mem0_usage_suppressed", default=False
+)
+
+# 「6 小时窗口」推断缓存的窗口长度（服务商不返回缓存字段时的兜底），可用环境变量调整。
+CACHE_WINDOW_HOURS = float(os.environ.get("MEM0_CACHE_WINDOW_HOURS", "6") or 6)
+
+# 缓存按 prompt 前缀命中，所以指纹只取前若干字符，避免每轮对话的尾部差异把命中打散。
+_PROMPT_PREFIX_CHARS = int(os.environ.get("MEM0_CACHE_PROMPT_PREFIX_CHARS", "1500") or 1500)
 
 # 模型类型常量
 LLM = "llm"
@@ -53,6 +68,15 @@ def current_usage_context() -> dict:
     return _usage_ctx.get()
 
 
+def suppress_usage_recording() -> None:
+    """临时停用用量采集（连通性测试、探活等调用不该进统计）。"""
+    _suppressed.set(True)
+
+
+def resume_usage_recording() -> None:
+    _suppressed.set(False)
+
+
 # --------------------------------------------------------------------------- #
 # 落库
 # --------------------------------------------------------------------------- #
@@ -62,11 +86,20 @@ def _record(
     prompt_tokens: Any = 0,
     completion_tokens: Any = 0,
     total_tokens: Any = None,
+    cached_tokens: Any = 0,
+    prompt_hash: Optional[str] = None,
 ) -> None:
     try:
+        if _suppressed.get():
+            return
         prompt = int(prompt_tokens or 0)
         completion = int(completion_tokens or 0)
         total = int(total_tokens) if total_tokens is not None else prompt + completion
+        cached = int(cached_tokens or 0)
+        if cached < 0:
+            cached = 0
+        if cached > prompt:
+            cached = prompt
         if prompt == 0 and completion == 0 and total == 0:
             return
 
@@ -84,6 +117,8 @@ def _record(
                     prompt_tokens=prompt,
                     completion_tokens=completion,
                     total_tokens=total,
+                    cached_tokens=cached,
+                    prompt_hash=prompt_hash,
                     operation=(ctx.get("operation") or "")[:32],
                     user_id=(str(ctx["user_id"])[:128] if ctx.get("user_id") else None),
                     request_id=(
@@ -96,6 +131,89 @@ def _record(
             db.close()
     except Exception:
         logger.exception("Failed to record token usage")
+
+
+def _prompt_fingerprint(messages: Any) -> Optional[str]:
+    """给 prompt 取指纹，用于「窗口内出现过相同 prompt」的缓存推断。
+
+    只取前缀若干字符：真实缓存是按前缀命中的，而每轮对话的尾部（用户新问题、
+    抽取出的记忆正文）本来就不同，全量哈希会让命中几乎永远为 0。
+    """
+    if not messages:
+        return None
+    try:
+        if isinstance(messages, str):
+            text = messages
+        else:
+            text = json.dumps(messages, sort_keys=True, ensure_ascii=False)
+    except Exception:
+        try:
+            text = str(messages)
+        except Exception:
+            return None
+    prefix = text[:_PROMPT_PREFIX_CHARS]
+    return hashlib.sha256(prefix.encode("utf-8", "ignore")).hexdigest()
+
+
+def _cached_tokens_from_provider(usage: Any) -> Optional[int]:
+    """读服务商返回的缓存命中字段（没有则返回 None，交给窗口推断）。"""
+    if usage is None:
+        return None
+
+    # OpenAI 风格：usage.prompt_tokens_details.cached_tokens
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is None and isinstance(usage, dict):
+        details = usage.get("prompt_tokens_details")
+    if details is not None:
+        if isinstance(details, dict):
+            value = details.get("cached_tokens")
+        else:
+            value = getattr(details, "cached_tokens", None)
+        if value is not None:
+            return int(value)
+
+    # DeepSeek 风格：顶层 prompt_cache_hit_tokens（新版 OpenAI SDK 落在 model_extra 里）
+    for name in ("prompt_cache_hit_tokens", "cache_hit_tokens", "cached_tokens"):
+        value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+        if value is not None:
+            return int(value)
+
+    extra = getattr(usage, "model_extra", None)
+    if isinstance(extra, dict):
+        for name in ("prompt_cache_hit_tokens", "cache_hit_tokens", "cached_tokens"):
+            if extra.get(name) is not None:
+                return int(extra[name])
+    return None
+
+
+def _seen_within_cache_window(prompt_hash: Optional[str]) -> bool:
+    """CACHE_WINDOW_HOURS 小时内是否已经出现过同一个 prompt（前缀）。"""
+    if not prompt_hash:
+        return False
+    try:
+        from sqlalchemy import select
+
+        from db import SessionLocal
+        from models import TokenUsage
+
+        since = datetime.now(timezone.utc) - timedelta(hours=CACHE_WINDOW_HOURS)
+        db = SessionLocal()
+        try:
+            row = db.execute(
+                select(TokenUsage.id)
+                .where(
+                    TokenUsage.model_type == LLM,
+                    TokenUsage.prompt_hash == prompt_hash,
+                    TokenUsage.created_at >= since,
+                )
+                .limit(1)
+            ).first()
+            return row is not None
+        finally:
+            db.close()
+    except Exception:
+        logger.debug("cache-window lookup failed", exc_info=True)
+        return False
 
 
 def _model_of(payload: Any) -> Optional[str]:
@@ -128,12 +246,21 @@ def _install_openai_hooks() -> None:
             try:
                 usage = getattr(response, "usage", None)
                 if usage is not None:
+                    prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+                    model_name = _model_of(kwargs) or getattr(response, "model", None)
+                    prompt_hash = _prompt_fingerprint(kwargs.get("messages"))
+                    cached = _cached_tokens_from_provider(usage)
+                    if cached is None:
+                        # 服务商不回缓存字段：按「窗口内出现过相同 prompt」推断（整段 prompt 视为命中）
+                        cached = prompt_tokens if _seen_within_cache_window(prompt_hash) else 0
                     _record(
                         LLM,
-                        _model_of(kwargs) or getattr(response, "model", None),
-                        getattr(usage, "prompt_tokens", 0),
+                        model_name,
+                        prompt_tokens,
                         getattr(usage, "completion_tokens", 0),
                         getattr(usage, "total_tokens", None),
+                        cached_tokens=cached,
+                        prompt_hash=prompt_hash,
                     )
             except Exception:
                 logger.exception("usage hook (chat completions) failed")

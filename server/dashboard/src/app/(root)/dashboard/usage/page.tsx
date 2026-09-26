@@ -182,7 +182,8 @@ export default function UsagePage() {
           <CardContent>
             <div className="text-2xl font-semibold">{fmt(totals?.total_tokens)}</div>
             <div className="mt-1 text-xs text-onSurface-default-secondary">
-              输入 {fmt(totals?.prompt_tokens)} · 输出 {fmt(totals?.completion_tokens)} · 调用 {fmt(totals?.calls)} 次
+              输入 {fmt(totals?.prompt_tokens)}（缓存命中 {fmt(totals?.prompt_cached_tokens)}） · 输出{" "}
+              {fmt(totals?.completion_tokens)} · 调用 {fmt(totals?.calls)} 次
             </div>
           </CardContent>
         </Card>
@@ -199,7 +200,8 @@ export default function UsagePage() {
             <CardContent>
               <div className="text-2xl font-semibold">{fmt(summary?.total_tokens)}</div>
               <div className="mt-1 text-xs text-onSurface-default-secondary">
-                输入 {fmt(summary?.prompt_tokens)} · 输出 {fmt(summary?.completion_tokens)} · 调用 {fmt(summary?.calls)} 次
+                输入 {fmt(summary?.prompt_tokens)}（缓存命中 {fmt(summary?.prompt_cached_tokens)}） · 输出{" "}
+                {fmt(summary?.completion_tokens)} · 调用 {fmt(summary?.calls)} 次
               </div>
               <div className="mt-2 text-xs text-onSurface-default-secondary">{meta.hint}</div>
               {summary?.model_name ? (
@@ -275,6 +277,7 @@ export default function UsagePage() {
                   </th>
                   <th className="py-2 pr-3 font-medium">模型</th>
                   <th className="py-2 pr-3 text-right font-medium">输入</th>
+                  <th className="py-2 pr-3 text-right font-medium">缓存命中</th>
                   <th className="py-2 pr-3 text-right font-medium">输出</th>
                   <th className="py-2 pr-3 text-right font-medium">合计</th>
                   <th className="py-2 text-right font-medium">调用次数</th>
@@ -295,6 +298,7 @@ export default function UsagePage() {
                       {modelLabel(row.model_type)}
                     </td>
                     <td className="py-2 pr-3 text-right tabular-nums">{fmt(row.prompt_tokens)}</td>
+                    <td className="py-2 pr-3 text-right tabular-nums">{fmt(row.prompt_cached_tokens)}</td>
                     <td className="py-2 pr-3 text-right tabular-nums">{fmt(row.completion_tokens)}</td>
                     <td className="py-2 pr-3 text-right font-medium tabular-nums">{fmt(row.total_tokens)}</td>
                     <td className="py-2 text-right tabular-nums">{fmt(row.calls)}</td>
@@ -306,9 +310,13 @@ export default function UsagePage() {
         </Card>
       ) : null}
 
-      <p className="text-xs text-onSurface-default-secondary">
+      <p className="text-xs text-onSurface-default-tertiary">
         说明：一次写入记忆通常会调多次模型（LLM 抽取 + 向量化），一次搜索通常调嵌入 + 重排，所以这里按「调用」逐次记录。
         数据来自记忆系统自身的模型调用，不含其他程序。
+        <br />
+        「缓存命中」是 LLM 输入 token 里命中服务商前缀缓存的部分（命中部分通常按折扣价计费）。
+        优先读服务商返回的真实值；服务商不回该字段时，按「<strong>6 小时</strong>内出现过相同 prompt」推算——窗口长度可用 MEM0_CACHE_WINDOW_HOURS 调整。
+        只有 LLM 有缓存，嵌入与重排恒为 0。
       </p>
     </div>
   );
