@@ -7,6 +7,8 @@ export interface Memory {
   updated_at?: string;
   /** 仅搜索结果返回：语义相关度（越大越相关） */
   score?: number;
+  /** 到期日（YYYY-MM-DD，UTC，含当天）。缺省/为空 = 永不过期。 */
+  expiration_date?: string | null;
 }
 
 export interface ApiKey {

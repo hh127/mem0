@@ -1,6 +1,5 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Lock } from "lucide-react";
 
@@ -8,19 +7,15 @@ interface LockedPageProps {
   title: string;
   description: string;
   previewContent: React.ReactNode;
-  utmMedium: string;
+  /** Kept for call-site compatibility; no longer used for outbound links. */
+  utmMedium?: string;
 }
 
 export function LockedPage({
   title,
   description,
   previewContent,
-  utmMedium,
 }: LockedPageProps) {
-  const utm = `utm_source=oss&utm_medium=${utmMedium}`;
-  const cloudUrl = `https://app.mem0.ai?${utm}`;
-  const salesUrl = `https://app.mem0.ai/enterprise?${utm}`;
-
   return (
     <div className="space-y-6">
       <div>
@@ -38,24 +33,12 @@ export function LockedPage({
       </div>
 
       <Card className="border-memBorder-primary">
-        <CardContent className="flex flex-col sm:flex-row items-center gap-4 py-6">
-          <div className="flex-1">
-            <p className="text-sm font-medium">
-              此功能仅在 Mem0 云端和企业版中可用。
-            </p>
-          </div>
-          <div className="flex gap-3">
-            <Button variant="default" asChild>
-              <a href={cloudUrl} target="_blank" rel="noopener noreferrer">
-                免费试用云服务
-              </a>
-            </Button>
-            <Button variant="outline" asChild>
-              <a href={salesUrl} target="_blank" rel="noopener noreferrer">
-                联系销售
-              </a>
-            </Button>
-          </div>
+        <CardContent className="py-6">
+          <p className="text-sm font-medium">自托管版不包含此功能。</p>
+          <p className="text-xs text-onSurface-default-secondary mt-1">
+            该页面依赖 Mem0
+            官方云端提供的数据接口，本部署没有对应后端，因此只保留界面预览。
+          </p>
         </CardContent>
       </Card>
     </div>

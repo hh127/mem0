@@ -13,8 +13,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "@/components/ui/use-toast";
-import { UpgradeBanner } from "@/components/self-hosted/upgrade-banner";
 import { getErrorMessage } from "@/lib/error-message";
 import { api } from "@/utils/api";
 import { MEMORY_ENDPOINTS } from "@/utils/api-endpoints";
@@ -88,7 +88,9 @@ function ModelTest({
             {result.provider}
             {result.model ? ` / ${result.model}` : ""} · {result.latency_ms} ms
           </span>
-          <div className="mt-0.5 break-all">{result.ok ? result.detail : result.error}</div>
+          <div className="mt-0.5 break-all">
+            {result.ok ? result.detail : result.error}
+          </div>
         </div>
       ) : null}
     </div>
@@ -113,7 +115,10 @@ export default function ConfigurationPage() {
   const [rerankerApiKey, setRerankerApiKey] = useState("");
   const [rerankerBaseUrl, setRerankerBaseUrl] = useState("");
   const [rerankerTopK, setRerankerTopK] = useState("");
-  const [tests, setTests] = useState<Record<TestTarget, TestState>>(EMPTY_TEST_STATE);
+  const [tests, setTests] =
+    useState<Record<TestTarget, TestState>>(EMPTY_TEST_STATE);
+  const [decayEnabled, setDecayEnabled] = useState(false);
+  const [isDecaySaving, setIsDecaySaving] = useState(false);
 
   const { data: config, isLoading: isPrefilling } = useApiQuery(
     async () => {
@@ -133,6 +138,19 @@ export default function ConfigurationPage() {
     { errorToast: "内置提供商加载失败" },
   );
 
+  // 记忆衰减开关：独立于 /configure 保存，改一下立即生效（后端写 os.environ）
+  const { data: decay } = useApiQuery<{ enabled: boolean }>(
+    async () => {
+      const res = await api.get<{ enabled: boolean }>(MEMORY_ENDPOINTS.DECAY);
+      return res.data;
+    },
+    { errorToast: "记忆衰减状态加载失败" },
+  );
+
+  useEffect(() => {
+    if (decay) setDecayEnabled(Boolean(decay.enabled));
+  }, [decay]);
+
   useEffect(() => {
     if (!config) return;
     const llmConfig = config.llm?.config;
@@ -144,17 +162,19 @@ export default function ConfigurationPage() {
     setLlmBaseUrl(
       (current) => current || (llmConfig?.openai_base_url as string) || "",
     );
-    setLlmTemperature((current) =>
-      current ||
-      (typeof llmConfig?.temperature === "number"
-        ? String(llmConfig.temperature)
-        : ""),
+    setLlmTemperature(
+      (current) =>
+        current ||
+        (typeof llmConfig?.temperature === "number"
+          ? String(llmConfig.temperature)
+          : ""),
     );
-    setLlmMaxTokens((current) =>
-      current ||
-      (typeof llmConfig?.max_tokens === "number"
-        ? String(llmConfig.max_tokens)
-        : ""),
+    setLlmMaxTokens(
+      (current) =>
+        current ||
+        (typeof llmConfig?.max_tokens === "number"
+          ? String(llmConfig.max_tokens)
+          : ""),
     );
 
     setEmbedderProvider(
@@ -176,22 +196,32 @@ export default function ConfigurationPage() {
     setRerankerBaseUrl(
       (current) => current || (rerankerConfig?.base_url as string) || "",
     );
-    setRerankerTopK((current) =>
-      current ||
-      (typeof rerankerConfig?.top_k === "number"
-        ? String(rerankerConfig.top_k)
-        : ""),
+    setRerankerTopK(
+      (current) =>
+        current ||
+        (typeof rerankerConfig?.top_k === "number"
+          ? String(rerankerConfig.top_k)
+          : ""),
     );
   }, [config]);
 
   const runTest = async (target: TestTarget, section: unknown) => {
-    setTests((prev) => ({ ...prev, [target]: { loading: true, result: null } }));
+    setTests((prev) => ({
+      ...prev,
+      [target]: { loading: true, result: null },
+    }));
     try {
-      const res = await api.post<ConfigureTestResult>(MEMORY_ENDPOINTS.CONFIGURE_TEST, {
-        target,
-        config: section,
-      });
-      setTests((prev) => ({ ...prev, [target]: { loading: false, result: res.data } }));
+      const res = await api.post<ConfigureTestResult>(
+        MEMORY_ENDPOINTS.CONFIGURE_TEST,
+        {
+          target,
+          config: section,
+        },
+      );
+      setTests((prev) => ({
+        ...prev,
+        [target]: { loading: false, result: res.data },
+      }));
     } catch (error) {
       setTests((prev) => ({
         ...prev,
@@ -266,6 +296,28 @@ export default function ConfigurationPage() {
     }
   };
 
+  const handleDecayToggle = async (next: boolean) => {
+    setIsDecaySaving(true);
+    try {
+      const res = await api.post<{ enabled: boolean }>(MEMORY_ENDPOINTS.DECAY, {
+        enabled: next,
+      });
+      setDecayEnabled(Boolean(res.data.enabled));
+      toast({
+        title: res.data.enabled ? "记忆衰减已开启" : "记忆衰减已关闭",
+        variant: "success",
+      });
+    } catch (error) {
+      toast({
+        title: "切换失败",
+        description: getErrorMessage(error),
+        variant: "destructive",
+      });
+    } finally {
+      setIsDecaySaving(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="space-y-1">
@@ -319,7 +371,9 @@ export default function ConfigurationPage() {
             </div>
           </div>
           <div className="space-y-1">
-            <Label className="text-xs">Base URL（兼容 OpenAI 协议的地址）</Label>
+            <Label className="text-xs">
+              Base URL（兼容 OpenAI 协议的地址）
+            </Label>
             <Input
               placeholder="https://api.deepseek.com/v1"
               value={llmBaseUrl}
@@ -421,7 +475,9 @@ export default function ConfigurationPage() {
             </div>
           </div>
           <div className="space-y-1">
-            <Label className="text-xs">Base URL（兼容 OpenAI 协议的地址）</Label>
+            <Label className="text-xs">
+              Base URL（兼容 OpenAI 协议的地址）
+            </Label>
             <Input
               placeholder="https://api.siliconflow.cn/v1"
               value={embedderBaseUrl}
@@ -440,8 +496,8 @@ export default function ConfigurationPage() {
             />
           </div>
           <p className="text-xs text-onSurface-default-tertiary">
-            换嵌入模型 = 换向量维度，历史记忆的向量对不上会导致搜索失效（当前 pgvector 为
-            1024 维）。只换 LLM 没有这个问题。
+            换嵌入模型 = 换向量维度，历史记忆的向量对不上会导致搜索失效（当前
+            pgvector 为 1024 维）。只换 LLM 没有这个问题。
           </p>
           <ModelTest
             target="embedder"
@@ -571,13 +627,32 @@ export default function ConfigurationPage() {
         </Button>
       )}
 
-      <UpgradeBanner
-        id="config-sso"
-        message="Looking for SSO / SAML? Available in Enterprise."
-        ctaLabel="联系销售"
-        ctaUrl="https://app.mem0.ai/enterprise?utm_source=oss&utm_medium=dashboard-configuration-sso"
-        variant="enterprise"
-      />
+      <Card className="border-memBorder-primary">
+        <CardHeader>
+          <CardTitle className="text-sm">记忆衰减（搜索期时间偏置）</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-xs text-onSurface-default-tertiary">
+            开启后，搜索时最近被用过的记忆会略微上浮、长期闲置的略微下沉（系数
+            0.3~1.5）。只影响排序，绝不删除任何记忆 ——
+            与「到期日」分工互补：衰减管排序，到期日管退役。
+          </p>
+          <div className="flex items-center gap-3">
+            <Switch
+              checked={decayEnabled}
+              onCheckedChange={(next) => void handleDecayToggle(next)}
+              disabled={!isAdmin || isDecaySaving}
+            />
+            <span className="text-sm">
+              {decayEnabled ? "已开启" : "已关闭"}
+              {isDecaySaving ? "（切换中…）" : ""}
+            </span>
+          </div>
+          <p className="text-xs text-onSurface-default-tertiary">
+            改这里立即生效，不用重启容器（后端写入进程环境，记忆库每次搜索都会读）。
+          </p>
+        </CardContent>
+      </Card>
     </div>
   );
 }

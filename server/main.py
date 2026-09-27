@@ -38,8 +38,10 @@ from routers import requests as requests_router
 from schemas import MessageResponse
 from server_state import (
     get_current_config,
+    get_decay_enabled,
     get_memory_instance,
     initialize_state,
+    set_decay_enabled,
     set_session_factory,
     update_config,
 )
@@ -411,6 +413,26 @@ async def log_requests(request: Request, call_next):
 @app.get("/configure", summary="Get current Mem0 configuration")
 def get_config(_auth=Depends(verify_auth)):
     return _redact_config(get_current_config())
+
+
+class DecayConfig(BaseModel):
+    enabled: bool = Field(..., description="Turn search-time recency bias on or off.")
+
+
+@app.get("/decay", summary="Get search-time decay (recency bias) state")
+def get_decay(_auth=Depends(verify_auth)):
+    """Self-hosted parity for the Platform's Memory Decay feature.
+
+    Decay is a soft ranking bias: it reorders search results by recency without
+    ever deleting anything. Stored in the settings table and re-applied at startup.
+    """
+    return {"enabled": get_decay_enabled()}
+
+
+@app.post("/decay", summary="Enable or disable search-time decay")
+def set_decay(body: DecayConfig, _auth=Depends(require_admin)):
+    """Takes effect immediately — the mem0 library reads MEM0_DECAY on every search."""
+    return {"enabled": set_decay_enabled(bool(body.enabled))}
 
 
 @app.get("/configure/providers", summary="List bundled LLM and embedder providers")

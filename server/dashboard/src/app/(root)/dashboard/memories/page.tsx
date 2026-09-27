@@ -20,7 +20,6 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet";
-import { UpgradeBanner } from "@/components/self-hosted/upgrade-banner";
 import { toast } from "@/components/ui/use-toast";
 import { getErrorMessage } from "@/lib/error-message";
 import { api } from "@/utils/api";
@@ -39,6 +38,8 @@ export default function MemoriesPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [isSavingExpiry, setIsSavingExpiry] = useState(false);
+  const [expiryInput, setExpiryInput] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [activeSearch, setActiveSearch] = useState("");
   // 重排开关：默认开（语义搜索先用向量召回，再用重排模型精排）
@@ -175,6 +176,31 @@ export default function MemoriesPage() {
     }
   };
 
+  const saveExpiry = async (value: string | null) => {
+    if (!selectedMemory) return;
+    setIsSavingExpiry(true);
+    try {
+      await api.put(MEMORY_ENDPOINTS.BY_ID(selectedMemory.id), {
+        expiration_date: value,
+      });
+      setSelectedMemory({ ...selectedMemory, expiration_date: value });
+      setExpiryInput(value ?? "");
+      toast({
+        title: value ? `到期日已设为 ${value}` : "已设为永不过期",
+        variant: "success",
+      });
+      void refetch();
+    } catch (error) {
+      toast({
+        title: "到期日更新失败",
+        description: getErrorMessage(error),
+        variant: "destructive",
+      });
+    } finally {
+      setIsSavingExpiry(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (!memoryToDelete) return;
     try {
@@ -220,21 +246,37 @@ export default function MemoriesPage() {
       render: (value: string) =>
         value ? format(new Date(value), "MMM d, yyyy") : "--",
     },
+    {
+      key: "expiration_date" as keyof Memory,
+      label: "到期日",
+      width: 110,
+      render: (value: string | null | undefined) => {
+        if (!value) {
+          return (
+            <span className="text-xs text-onSurface-default-tertiary">
+              永久
+            </span>
+          );
+        }
+        const today = new Date().toISOString().slice(0, 10);
+        return (
+          <span
+            className={
+              value < today
+                ? "text-xs text-onSurface-danger-primary"
+                : "text-xs font-mono"
+            }
+          >
+            {value}
+          </span>
+        );
+      },
+    },
   ];
 
   return (
     <div className="space-y-4">
       <h1 className="text-xl font-semibold font-fustat">记忆</h1>
-
-      {memories.length >= MEMORY_FETCH_LIMIT && (
-        <UpgradeBanner
-          id="memories-1k"
-          message="1,000+ memories stored. Categories can help organize them."
-          ctaLabel="了解云服务"
-          ctaUrl="https://app.mem0.ai?utm_source=oss&utm_medium=dashboard-memories"
-          variant="cloud"
-        />
-      )}
 
       <div className="flex flex-wrap items-center gap-3">
         <Input
@@ -321,6 +363,7 @@ export default function MemoriesPage() {
               onRowClick={(row) => {
                 setSelectedMemory(row);
                 setIsEditing(false);
+                setExpiryInput(row.expiration_date ?? "");
               }}
               getRowClassName={(row) =>
                 selectedMemory?.id === row.id
@@ -468,6 +511,41 @@ export default function MemoriesPage() {
                   </div>
                 )}
               </div>
+
+              <div className="space-y-1">
+                <Label className="text-xs text-onSurface-default-tertiary">
+                  到期日
+                </Label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    type="date"
+                    value={expiryInput}
+                    onChange={(e) => setExpiryInput(e.target.value)}
+                    className="h-8 w-40 text-sm"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={isSavingExpiry || !expiryInput}
+                    onClick={() => void saveExpiry(expiryInput || null)}
+                  >
+                    保存
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={isSavingExpiry || !selectedMemory.expiration_date}
+                    onClick={() => void saveExpiry(null)}
+                  >
+                    设为永久
+                  </Button>
+                </div>
+                <p className="text-xs text-onSurface-default-tertiary">
+                  到期后该记忆会从搜索和列表中隐藏（数据仍在库里，清掉日期即恢复）。不设日期
+                  = 永不过期。
+                </p>
+              </div>
+
               <Button
                 variant="outline"
                 size="sm"
