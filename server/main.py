@@ -188,9 +188,44 @@ DEFAULT_CUSTOM_INSTRUCTIONS = os.environ.get(
     "严禁翻译成英文。技术术语、产品型号、公司名、人名、专有名词保持输入中的原样形式。",
 )
 
+DEFAULT_CATEGORIES_FILE = os.environ.get(
+    "MEM0_CATEGORIES_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "categories.json"),
+)
+
+
+def _load_category_catalog() -> Dict[str, Any]:
+    """Load the shipped category catalog: entries (name/description) + ordered decision rules.
+
+    Returns ``{}`` when the file is missing or malformed so the server still boots — a
+    deployment shipping no catalog simply ends up with categorization disabled.
+    """
+    try:
+        with open(DEFAULT_CATEGORIES_FILE, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        logging.warning("Failed to load category catalog from %s", DEFAULT_CATEGORIES_FILE, exc_info=True)
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    loaded: Dict[str, Any] = {}
+    categories = payload.get("categories") or None
+    rules = payload.get("decision_rules") or None
+    if categories:
+        loaded["custom_categories"] = categories
+    if rules:
+        loaded["custom_category_rules"] = rules
+    return loaded
+
+
 DEFAULT_CONFIG = {
     "version": "v1.1",
     "custom_instructions": DEFAULT_CUSTOM_INSTRUCTIONS,
+    # Category catalog (Platform parity): shipped in categories.json, overridable per
+    # deployment via MEM0_CATEGORIES_FILE and per project via the config_overrides row.
+    **_load_category_catalog(),
     "vector_store": {
         "provider": "pgvector",
         "config": {
@@ -262,6 +297,19 @@ class MemoryCreate(BaseModel):
     infer: Optional[bool] = Field(None, description="Whether to extract facts from messages. Defaults to True.")
     memory_type: Optional[str] = Field(None, description="Type of memory to store (e.g. 'core').")
     prompt: Optional[str] = Field(None, description="Custom prompt to use for fact extraction.")
+    custom_categories: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description=(
+            "Per-call category catalog: the memories extracted by this call are tagged with the "
+            "closest matches and the tags are stored under `categories`. Replaces (does not merge "
+            "with) the project catalog. Accepts [{\"name\": ..., \"description\": ...}] or "
+            "{\"name\": \"description\"} entries. Defaults to the project catalog."
+        ),
+    )
+    custom_category_rules: Optional[List[str]] = Field(
+        None,
+        description="Ordered disambiguation rules injected into the categorization prompt for this call.",
+    )
 
 
 class MemoryUpdate(BaseModel):
@@ -435,6 +483,71 @@ def set_decay(body: DecayConfig, _auth=Depends(require_admin)):
     return {"enabled": set_decay_enabled(bool(body.enabled))}
 
 
+class CategoryCatalog(BaseModel):
+    custom_categories: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description=(
+            "Full replacement for the project catalog. Entries are "
+            "[{\"name\": ..., \"description\": ...}] (or {\"name\": \"description\"} / bare names)."
+        ),
+    )
+    custom_category_rules: Optional[List[str]] = Field(
+        None, description="Ordered disambiguation rules injected into the categorization prompt."
+    )
+
+
+@app.get("/categories", summary="Get the active category catalog")
+def get_categories(_auth=Depends(verify_auth)):
+    """Self-hosted parity for the Platform's Custom Categories feature.
+
+    Returns the catalog every `add` is categorized with (project level). A per-call
+    `custom_categories` on POST /memories replaces it for that call only.
+    """
+    config = get_current_config()
+    catalog = config.get("custom_categories") or []
+    return {
+        "custom_categories": catalog,
+        "custom_category_rules": config.get("custom_category_rules") or [],
+        "names": [entry.get("name") for entry in catalog if isinstance(entry, dict)],
+    }
+
+
+@app.post("/categories", summary="Replace the project category catalog")
+def set_categories(body: CategoryCatalog, _auth=Depends(require_admin)):
+    """Replace the project catalog (Platform `project.update(custom_categories=...)` parity).
+
+    Persisted to the settings table, so it survives restarts. Changing the catalog does not
+    re-tag memories that already exist — tags are applied at ingestion time only.
+    """
+    from mem0.memory.categorization import normalize_catalog
+
+    updates: Dict[str, Any] = {}
+    if "custom_categories" in body.model_fields_set:
+        try:
+            normalized = normalize_catalog(body.custom_categories or [])
+        except ValueError as e:
+            raise _client_error(e)
+        if body.custom_categories and not normalized:
+            raise HTTPException(status_code=400, detail="No usable categories in the provided catalog.")
+        updates["custom_categories"] = [{"name": name, "description": description} for name, description in normalized]
+    if "custom_category_rules" in body.model_fields_set:
+        updates["custom_category_rules"] = [
+            str(rule).strip() for rule in (body.custom_category_rules or []) if str(rule).strip()
+        ]
+    if not updates:
+        raise HTTPException(
+            status_code=400, detail="Provide custom_categories and/or custom_category_rules."
+        )
+
+    updated = update_config(updates)
+    catalog = updated.get("custom_categories") or []
+    return {
+        "custom_categories": catalog,
+        "custom_category_rules": updated.get("custom_category_rules") or [],
+        "names": [entry.get("name") for entry in catalog if isinstance(entry, dict)],
+    }
+
+
 @app.get("/configure/providers", summary="List bundled LLM and embedder providers")
 def list_bundled_providers(_auth=Depends(verify_auth)):
     return {"llm": list(BUNDLED_LLM_PROVIDERS), "embedder": list(BUNDLED_EMBEDDER_PROVIDERS)}
@@ -595,7 +708,17 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 
 
 ALL_MEMORIES_LIMIT = 1000
-_RESERVED_PAYLOAD_KEYS = {"data", "user_id", "agent_id", "run_id", "hash", "created_at", "updated_at", "expiration_date"}
+_RESERVED_PAYLOAD_KEYS = {
+    "data",
+    "user_id",
+    "agent_id",
+    "run_id",
+    "hash",
+    "created_at",
+    "updated_at",
+    "expiration_date",
+    "categories",
+}
 
 
 def _serialize_memory(row: Any) -> Dict[str, Any]:
@@ -608,6 +731,7 @@ def _serialize_memory(row: Any) -> Dict[str, Any]:
         "run_id": payload.get("run_id"),
         "hash": payload.get("hash"),
         "expiration_date": payload.get("expiration_date"),
+        "categories": payload.get("categories") or [],
         "metadata": {k: v for k, v in payload.items() if k not in _RESERVED_PAYLOAD_KEYS},
         "created_at": payload.get("created_at"),
         "updated_at": payload.get("updated_at"),

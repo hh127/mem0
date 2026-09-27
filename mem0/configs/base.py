@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -53,6 +53,21 @@ class MemoryConfig(BaseModel):
     )
     custom_instructions: Optional[str] = Field(
         description="Custom instructions for fact extraction",
+        default=None,
+    )
+    custom_categories: Optional[List[Any]] = Field(
+        description=(
+            "Default category catalog applied to every add() that does not pass its own. "
+            "Accepts [{'name': ..., 'description': ...}], [{name: description}], a mapping, "
+            "or a list of bare names. None (default) disables categorization entirely."
+        ),
+        default=None,
+    )
+    custom_category_rules: Optional[List[str]] = Field(
+        description=(
+            "Ordered disambiguation rules appended to the categorization prompt after the "
+            "catalog (e.g. '如果用户已经明确决定采用某个方案：→ 重要决策')."
+        ),
         default=None,
     )
 

@@ -10,7 +10,7 @@ import uuid
 import warnings
 from copy import deepcopy
 from datetime import date, datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import ValidationError
 
@@ -25,6 +25,7 @@ from mem0.configs.prompts import (
 from mem0.exceptions import LLMError, VectorStoreError
 from mem0.exceptions import ValidationError as Mem0ValidationError
 from mem0.memory.base import MemoryBase
+from mem0.memory.categorization import CATEGORY_FIELD, categorize_memories
 from mem0.memory.decay import (
     apply_decay,
     is_enabled as decay_enabled,
@@ -507,6 +508,9 @@ class Memory(MemoryBase):
         self.collection_name = self.config.vector_store.config.collection_name
         self.api_version = self.config.version
         self.custom_instructions = self.config.custom_instructions
+        # Project-level categorization defaults; a per-call custom_categories argument wins.
+        self.custom_categories = self.config.custom_categories
+        self.custom_category_rules = self.config.custom_category_rules
 
         # Initialize reranker if configured
         self.reranker = None
@@ -776,6 +780,8 @@ class Memory(MemoryBase):
         infer: bool = True,
         memory_type: Optional[str] = None,
         prompt: Optional[str] = None,
+        custom_categories: Optional[List[Dict[str, Any]]] = None,
+        custom_category_rules: Optional[List[str]] = None,
     ):
         """
         Create a new memory.
@@ -801,6 +807,14 @@ class Memory(MemoryBase):
                 creating procedural memories (typically requires 'agent_id'). Otherwise, memories
                 are treated as general conversational/factual memories.
             prompt (str, optional): Prompt to use for the memory creation. Defaults to None.
+            custom_categories (list, optional): Category catalog used to tag every memory
+                written by this call. Accepts ``[{"name": ..., "description": ...}]``,
+                ``[{name: description}]``, a plain mapping, or a list of bare names.
+                Tags are stored in the payload under ``categories`` and are queryable via
+                ``filters={"categories": {"contains": "<name>"}}``. Defaults to None (no
+                categorization, no extra LLM call).
+            custom_category_rules (list[str], optional): Ordered disambiguation rules
+                injected into the categorization prompt after the catalog. Defaults to None.
 
         Note:
             `search()` and `get_all()` scope queries via `filters={"user_id": "...", "agent_id": "...", "run_id": "..."}` —
@@ -874,7 +888,29 @@ class Memory(MemoryBase):
         else:
             messages = parse_vision_messages(messages)
 
-        vector_store_result = self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
+        # Per-call catalog wins over the project-level one (Platform resolution order).
+        # getattr: instances built by hand (tests/subclasses) may predate the attribute.
+        effective_custom_categories = (
+            custom_categories if custom_categories is not None else getattr(self, "custom_categories", None)
+        )
+        effective_custom_category_rules = (
+            custom_category_rules if custom_category_rules is not None else getattr(self, "custom_category_rules", None)
+        )
+        # Only widen the call shape when there is a catalog to apply, so the no-catalog
+        # path stays byte-identical to the upstream call signature.
+        categorization_kwargs: Dict[str, Any] = {}
+        if effective_custom_categories:
+            categorization_kwargs["custom_categories"] = effective_custom_categories
+            categorization_kwargs["custom_category_rules"] = effective_custom_category_rules
+
+        vector_store_result = self._add_to_vector_store(
+            messages,
+            processed_metadata,
+            effective_filters,
+            infer,
+            prompt=prompt,
+            **categorization_kwargs,
+        )
         scale_threshold_notice = detect_scale_threshold_from_add_result(self, vector_store_result)
         if temporal_usage_notice:
             display_temporal_usage_notice(self, "sync", "add", *temporal_usage_notice)
@@ -884,9 +920,23 @@ class Memory(MemoryBase):
             display_first_run_notice(self, "sync", "add")
         return {"results": vector_store_result}
 
-    def _add_to_vector_store(self, messages, metadata, filters, infer, prompt=None):
+    def _add_to_vector_store(
+        self, messages, metadata, filters, infer, prompt=None, custom_categories=None, custom_category_rules=None
+    ):
         if not infer:
             returned_memories = []
+            # Optional categorization for raw (non-inferred) writes: one LLM call for the
+            # whole batch, keyed by message text. Off unless a catalog is supplied.
+            raw_categories_by_text: Dict[str, List[str]] = {}
+            if custom_categories:
+                raw_texts = [
+                    m["content"]
+                    for m in messages
+                    if isinstance(m, dict) and isinstance(m.get("content"), str) and m.get("role") != "system"
+                ]
+                if raw_texts:
+                    mapped = categorize_memories(self.llm, raw_texts, custom_categories, custom_category_rules)
+                    raw_categories_by_text = {raw_texts[i]: cats for i, cats in mapped.items() if i < len(raw_texts)}
             for message_dict in messages:
                 if (
                     not isinstance(message_dict, dict)
@@ -907,6 +957,9 @@ class Memory(MemoryBase):
                     per_msg_meta["actor_id"] = actor_name
 
                 msg_content = message_dict["content"]
+                msg_categories = raw_categories_by_text.get(msg_content) if isinstance(msg_content, str) else None
+                if msg_categories:
+                    per_msg_meta[CATEGORY_FIELD] = msg_categories
                 msg_embeddings = self.embedding_model.embed(msg_content, "add")
                 mem_id = self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
 
@@ -1049,6 +1102,24 @@ class Memory(MemoryBase):
         if not records:
             self.db.save_messages(messages, session_scope)
             return []
+
+        # Phase 5b: Optional categorization (Platform-parity). One LLM call for the whole
+        # batch, run after dedup so duplicate texts cost nothing. Failures never block the
+        # write — categorize_memories() is fail-open by contract.
+        if custom_categories:
+            try:
+                category_map = categorize_memories(
+                    self.llm,
+                    [r[1] for r in records],
+                    custom_categories,
+                    custom_category_rules,
+                )
+            except Exception as e:  # defensive: categorization must never block a write
+                logger.warning(f"Categorization failed (memories stored uncategorized): {e}")
+                category_map = {}
+            for idx, record in enumerate(records):
+                if category_map.get(idx):
+                    record[3][CATEGORY_FIELD] = category_map[idx]
 
         # Phase 6: Batch persist
         all_vectors = [r[2] for r in records]
@@ -1249,6 +1320,7 @@ class Memory(MemoryBase):
             "role",
             "attributed_to",
             "expiration_date",
+            "categories",
         ]
 
         core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
@@ -1367,6 +1439,7 @@ class Memory(MemoryBase):
             "role",
             "attributed_to",
             "expiration_date",
+            "categories",
         ]
         core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
 
@@ -1724,6 +1797,7 @@ class Memory(MemoryBase):
             "role",
             "attributed_to",
             "expiration_date",
+            "categories",
             "last_accessed_at",
             "access_count",
         ]
@@ -2224,6 +2298,9 @@ class AsyncMemory(MemoryBase):
         self.collection_name = self.config.vector_store.config.collection_name
         self.api_version = self.config.version
         self.custom_instructions = self.config.custom_instructions
+        # Project-level categorization defaults; a per-call custom_categories argument wins.
+        self.custom_categories = self.config.custom_categories
+        self.custom_category_rules = self.config.custom_category_rules
         self._entity_store = None
 
         # Initialize reranker if configured
@@ -2482,6 +2559,8 @@ class AsyncMemory(MemoryBase):
         infer: bool = True,
         memory_type: Optional[str] = None,
         prompt: Optional[str] = None,
+        custom_categories: Optional[List[Dict[str, Any]]] = None,
+        custom_category_rules: Optional[List[str]] = None,
         llm=None,
     ):
         """
@@ -2500,6 +2579,11 @@ class AsyncMemory(MemoryBase):
             memory_type (str, optional): Type of memory to create. Defaults to None.
                                          Pass "procedural_memory" to create procedural memories.
             prompt (str, optional): Prompt to use for the memory creation. Defaults to None.
+            custom_categories (list, optional): Category catalog used to tag every memory
+                written by this call (see ``Memory.add`` for accepted shapes). Tags land in
+                the payload under ``categories``. Defaults to None (no categorization).
+            custom_category_rules (list[str], optional): Ordered disambiguation rules
+                injected into the categorization prompt. Defaults to None.
             llm (BaseChatModel, optional): LLM class to use for generating procedural memories. Defaults to None. Useful when user is using LangChain ChatModel.
 
         Note:
@@ -2560,7 +2644,27 @@ class AsyncMemory(MemoryBase):
         else:
             messages = parse_vision_messages(messages)
 
-        vector_store_result = await self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
+        # Per-call catalog wins over the project-level one (Platform resolution order).
+        # getattr: instances built by hand (tests/subclasses) may predate the attribute.
+        effective_custom_categories = (
+            custom_categories if custom_categories is not None else getattr(self, "custom_categories", None)
+        )
+        effective_custom_category_rules = (
+            custom_category_rules if custom_category_rules is not None else getattr(self, "custom_category_rules", None)
+        )
+        categorization_kwargs: Dict[str, Any] = {}
+        if effective_custom_categories:
+            categorization_kwargs["custom_categories"] = effective_custom_categories
+            categorization_kwargs["custom_category_rules"] = effective_custom_category_rules
+
+        vector_store_result = await self._add_to_vector_store(
+            messages,
+            processed_metadata,
+            effective_filters,
+            infer,
+            prompt=prompt,
+            **categorization_kwargs,
+        )
         scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, vector_store_result)
         if temporal_usage_notice:
             await display_temporal_usage_notice_async(self, "async", "add", *temporal_usage_notice)
@@ -2577,9 +2681,25 @@ class AsyncMemory(MemoryBase):
         effective_filters: dict,
         infer: bool,
         prompt: Optional[str] = None,
+        custom_categories: Optional[list] = None,
+        custom_category_rules: Optional[list] = None,
     ):
         if not infer:
             returned_memories = []
+            # Optional categorization for raw (non-inferred) writes (async): one LLM call
+            # for the whole batch, keyed by message text.
+            raw_categories_by_text: Dict[str, List[str]] = {}
+            if custom_categories:
+                raw_texts = [
+                    m["content"]
+                    for m in messages
+                    if isinstance(m, dict) and isinstance(m.get("content"), str) and m.get("role") != "system"
+                ]
+                if raw_texts:
+                    mapped = await asyncio.to_thread(
+                        categorize_memories, self.llm, raw_texts, custom_categories, custom_category_rules
+                    )
+                    raw_categories_by_text = {raw_texts[i]: cats for i, cats in mapped.items() if i < len(raw_texts)}
             for message_dict in messages:
                 if (
                     not isinstance(message_dict, dict)
@@ -2600,6 +2720,9 @@ class AsyncMemory(MemoryBase):
                     per_msg_meta["actor_id"] = actor_name
 
                 msg_content = message_dict["content"]
+                msg_categories = raw_categories_by_text.get(msg_content) if isinstance(msg_content, str) else None
+                if msg_categories:
+                    per_msg_meta[CATEGORY_FIELD] = msg_categories
                 msg_embeddings = await asyncio.to_thread(self.embedding_model.embed, msg_content, "add")
                 mem_id = await self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
 
@@ -2739,6 +2862,24 @@ class AsyncMemory(MemoryBase):
         if not records:
             await asyncio.to_thread(self.db.save_messages, messages, session_scope)
             return []
+
+        # Phase 5b: Optional categorization (Platform-parity, async). One LLM call for the
+        # whole batch, run after dedup; fail-open so it can never block a write.
+        if custom_categories:
+            try:
+                category_map = await asyncio.to_thread(
+                    categorize_memories,
+                    self.llm,
+                    [r[1] for r in records],
+                    custom_categories,
+                    custom_category_rules,
+                )
+            except Exception as e:  # defensive: categorization must never block a write
+                logger.warning(f"Categorization failed (memories stored uncategorized): {e}")
+                category_map = {}
+            for idx, record in enumerate(records):
+                if category_map.get(idx):
+                    record[3][CATEGORY_FIELD] = category_map[idx]
 
         # Phase 6: Batch persist
         all_vectors = [r[2] for r in records]
@@ -2941,6 +3082,7 @@ class AsyncMemory(MemoryBase):
             "role",
             "attributed_to",
             "expiration_date",
+            "categories",
         ]
 
         core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
@@ -3059,6 +3201,7 @@ class AsyncMemory(MemoryBase):
             "role",
             "attributed_to",
             "expiration_date",
+            "categories",
         ]
         core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
 
@@ -3422,6 +3565,7 @@ class AsyncMemory(MemoryBase):
             "role",
             "attributed_to",
             "expiration_date",
+            "categories",
             "last_accessed_at",
             "access_count",
         ]
