@@ -25,6 +25,12 @@ from mem0.configs.prompts import (
 from mem0.exceptions import LLMError, VectorStoreError
 from mem0.exceptions import ValidationError as Mem0ValidationError
 from mem0.memory.base import MemoryBase
+from mem0.memory.decay import (
+    apply_decay,
+    is_enabled as decay_enabled,
+    pool_size as decay_pool_size,
+    record_access,
+)
 from mem0.memory.notices import (
     PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS,
     detect_decay_usage_from_delete,
@@ -1505,18 +1511,27 @@ class Memory(MemoryBase):
         )
 
         search_start = time.perf_counter()
+        fetch_k = decay_pool_size(limit)
         original_memories = self._search_vector_store(
-            query, effective_filters, limit, threshold, explain=explain, show_expired=show_expired
+            query, effective_filters, fetch_k, threshold, explain=explain, show_expired=show_expired
         )
         search_elapsed_seconds = time.perf_counter() - search_start
 
         # Apply reranking if enabled and reranker is available
         if rerank and self.reranker and original_memories:
             try:
-                reranked_memories = self.reranker.rerank(query, original_memories, limit)
+                reranked_memories = self.reranker.rerank(query, original_memories, fetch_k)
                 original_memories = reranked_memories
             except Exception as e:
                 logger.warning(f"Reranking failed, using original results: {e}")
+
+        # Search-time decay (recency bias): reinforce recently-retrieved
+        # memories, dampen stale ones, then truncate back to the requested
+        # top_k. Access bookkeeping is written back off the request path.
+        # No-op unless MEM0_DECAY=true.
+        if decay_enabled():
+            original_memories = apply_decay(original_memories, limit)
+            record_access(original_memories, self.vector_store)
 
         if temporal_usage_notice:
             display_temporal_usage_notice(self, "sync", "search", *temporal_usage_notice)
@@ -1709,6 +1724,8 @@ class Memory(MemoryBase):
             "role",
             "attributed_to",
             "expiration_date",
+            "last_accessed_at",
+            "access_count",
         ]
         core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
 
@@ -3190,8 +3207,9 @@ class AsyncMemory(MemoryBase):
         )
 
         search_start = time.perf_counter()
+        fetch_k = decay_pool_size(limit)
         original_memories = await self._search_vector_store(
-            query, effective_filters, limit, threshold, explain=explain, show_expired=show_expired
+            query, effective_filters, fetch_k, threshold, explain=explain, show_expired=show_expired
         )
         search_elapsed_seconds = time.perf_counter() - search_start
 
@@ -3200,11 +3218,19 @@ class AsyncMemory(MemoryBase):
             try:
                 # Run reranking in thread pool to avoid blocking async loop
                 reranked_memories = await asyncio.to_thread(
-                    self.reranker.rerank, query, original_memories, limit
+                    self.reranker.rerank, query, original_memories, fetch_k
                 )
                 original_memories = reranked_memories
             except Exception as e:
                 logger.warning(f"Reranking failed, using original results: {e}")
+
+        # Search-time decay (recency bias): reinforce recently-retrieved
+        # memories, dampen stale ones, then truncate back to the requested
+        # top_k. record_access dispatches its I/O to a worker thread, so the
+        # event loop is not blocked. No-op unless MEM0_DECAY=true.
+        if decay_enabled():
+            original_memories = apply_decay(original_memories, limit)
+            record_access(original_memories, self.vector_store)
 
         if temporal_usage_notice:
             await display_temporal_usage_notice_async(self, "async", "search", *temporal_usage_notice)
@@ -3396,6 +3422,8 @@ class AsyncMemory(MemoryBase):
             "role",
             "attributed_to",
             "expiration_date",
+            "last_accessed_at",
+            "access_count",
         ]
         core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
 
