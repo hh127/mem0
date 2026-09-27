@@ -144,6 +144,25 @@ def _merge_config(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, An
     return merged
 
 
+def _without_disabled_categories(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop ``enabled: false`` entries from the catalog the Memory instance is built with.
+
+    The stored config keeps the full catalog (the dashboard shows disabled categories and
+    can re-enable them), but the classifier must never see one — otherwise a category the
+    user switched off can still be assigned to new memories. An all-disabled catalog
+    becomes empty, which is exactly "categorization off".
+    """
+    catalog = config.get("custom_categories")
+    if not isinstance(catalog, list):
+        return config
+    enabled = [entry for entry in catalog if not (isinstance(entry, dict) and entry.get("enabled") is False)]
+    if len(enabled) == len(catalog):
+        return config
+    trimmed = deepcopy(config)
+    trimmed["custom_categories"] = enabled
+    return trimmed
+
+
 def initialize_state(default_config: Dict[str, Any]) -> None:
     global _current_config, _memory_instance
     restore_decay_setting()
@@ -152,7 +171,7 @@ def initialize_state(default_config: Dict[str, Any]) -> None:
         overrides = _load_overrides()
         if overrides:
             _current_config = _merge_config(_current_config, overrides)
-        _memory_instance = Memory.from_config(_current_config)
+        _memory_instance = Memory.from_config(_without_disabled_categories(_current_config))
 
 
 def update_config(updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -160,7 +179,7 @@ def update_config(updates: Dict[str, Any]) -> Dict[str, Any]:
     with _state_lock:
         next_config = _merge_config(_current_config, updates)
         _current_config = next_config
-        _memory_instance = Memory.from_config(next_config)
+        _memory_instance = Memory.from_config(_without_disabled_categories(next_config))
         overrides = _load_overrides()
         overrides = _merge_config(overrides, updates)
         _save_overrides(overrides)

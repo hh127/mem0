@@ -48,6 +48,25 @@ _OUTPUT_SPEC = """输出要求：
 输出格式（index 为输入记忆的编号）：
 {"results": [{"index": 0, "categories": ["分类名"]}, {"index": 1, "categories": []}]}"""
 
+_EXPLAIN_HEADER = (
+    "你的任务：判断下面这段用户信息最可能属于哪个分类，给出候选排序与判断依据。\n\n"
+    "分类目录："
+)
+
+_EXPLAIN_SPEC = """输出要求：
+- 按可能性从高到低最多给出 3 个候选；每个候选给 confidence（0 到 1 之间的小数，保留两位）。
+- 分类名必须与目录中的写法完全一致，禁止创造目录外的分类名、禁止翻译。
+- reason 用一句中文说明判断依据（分类边界、关键词或用户意图），不要复述原文。
+- 确实都不合适时 candidates 返回空列表。
+- 只输出 JSON，不要解释、不要代码块之外的内容。
+
+输出格式：
+{"candidates": [{"name": "分类名", "confidence": 0.92, "reason": "..."}]}"""
+
+#: Two candidates closer than this are reported as a boundary conflict by
+#: :func:`explain_categorization` — the UI surfaces them for a human decision.
+CONFLICT_MARGIN = 0.15
+
 
 def normalize_catalog(catalog: Any) -> List[Tuple[str, str]]:
     """Normalize a category catalog into a de-duplicated ``[(name, description)]`` list.
@@ -258,3 +277,130 @@ def categorize_memory(
 ) -> List[str]:
     """Single-memory convenience wrapper around :func:`categorize_memories`."""
     return categorize_memories(llm, [text], catalog, decision_rules).get(0, [])
+
+
+def build_explanation_prompt(catalog: Any, decision_rules: Optional[Sequence[str]] = None) -> str:
+    """Build the single-text "why this category" prompt used by the category tester."""
+    entries = normalize_catalog(catalog)
+    if not entries:
+        raise ValueError("cannot build an explanation prompt from an empty catalog")
+
+    lines = [f"- {name}：{description}" if description else f"- {name}" for name, description in entries]
+    parts = [_EXPLAIN_HEADER, "\n".join(lines)]
+    if decision_rules:
+        rules = [str(rule).strip() for rule in decision_rules if str(rule).strip()]
+        if rules:
+            parts.append(_RULES_HEADER)
+            parts.append("\n".join(f"{idx}. {rule}" for idx, rule in enumerate(rules, 1)))
+    parts.append(_EXPLAIN_SPEC)
+    return "\n\n".join(parts)
+
+
+def _parse_explanation(response: str, catalog: Any, max_candidates: int) -> List[Dict[str, Any]]:
+    """Parse a ranked-candidates response into ``[{name, confidence, reason}]``.
+
+    Strict on names (catalog only) and on confidence (0-1 float, entries without a
+    usable number are dropped) so the tester never shows an invented score.
+    """
+    entries = normalize_catalog(catalog)
+    if not entries or not response:
+        return []
+
+    valid_names = {name for name, _ in entries}
+    lower_to_original = {name.lower(): name for name in valid_names}
+
+    try:
+        payload = remove_code_blocks(response)
+        try:
+            parsed = json.loads(payload, strict=False)
+        except json.JSONDecodeError:
+            parsed = json.loads(extract_json(payload), strict=False)
+    except Exception as e:
+        logger.warning(f"Failed to parse categorization explanation: {e}. Response: {str(response)[:200]}")
+        return []
+
+    raw_candidates = parsed.get("candidates") if isinstance(parsed, dict) else None
+    if raw_candidates is None and isinstance(parsed, list):
+        raw_candidates = parsed
+    if not isinstance(raw_candidates, list):
+        return []
+
+    best: Dict[str, Dict[str, Any]] = {}
+    for item in raw_candidates:
+        if not isinstance(item, dict):
+            continue
+        raw_name = item.get("name") or item.get("category")
+        if not raw_name:
+            continue
+        name = str(raw_name).replace("\u3000", " ").strip()
+        if name not in valid_names:
+            name = lower_to_original.get(name.lower(), "")
+        if not name:
+            logger.info(f"Ignoring unknown category from LLM explanation: {raw_name}")
+            continue
+        try:
+            confidence = float(str(item.get("confidence")).strip())
+        except (TypeError, ValueError):
+            continue
+        confidence = min(1.0, max(0.0, confidence))
+        reason = str(item.get("reason") or item.get("why") or "").strip()
+        current = best.get(name)
+        if current is None or confidence > current["confidence"]:
+            best[name] = {"name": name, "confidence": confidence, "reason": reason}
+
+    ranked = sorted(best.values(), key=lambda candidate: candidate["confidence"], reverse=True)
+    return ranked[:max_candidates]
+
+
+def explain_categorization(
+    llm: Any,
+    text: str,
+    catalog: Any,
+    decision_rules: Optional[Sequence[str]] = None,
+    max_candidates: int = 3,
+) -> Dict[str, Any]:
+    """Classify ONE text and explain the ranking — the dashboard's category tester.
+
+    Unlike :func:`categorize_memories` this never fails open silently: it returns a
+    structured result the UI can render, with ``error`` set when the probe could not run.
+
+    Returns:
+        ``{"candidates": [{"name", "confidence", "reason"}], "top": str | None,
+        "conflict": bool, "error": str | None}``. ``conflict`` is True when the top two
+        candidates differ by less than :data:`CONFLICT_MARGIN`, i.e. the sample sits on a
+        category boundary and deserves a human decision.
+    """
+    result: Dict[str, Any] = {"candidates": [], "top": None, "conflict": False, "error": None}
+
+    if not text or not str(text).strip():
+        result["error"] = "请先输入一段内容再测试分类"
+        return result
+
+    try:
+        if not normalize_catalog(catalog):
+            result["error"] = "当前分类目录为空，无法分类"
+            return result
+        system_prompt = build_explanation_prompt(catalog, decision_rules)
+    except Exception as e:
+        result["error"] = f"分类目录不可用：{e}"
+        return result
+
+    try:
+        response = llm.generate_response(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": str(text)},
+            ],
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        result["error"] = f"分类模型调用失败：{e}"
+        return result
+
+    candidates = _parse_explanation(response, catalog, max_candidates)
+    result["candidates"] = candidates
+    if candidates:
+        result["top"] = candidates[0]["name"]
+        if len(candidates) > 1:
+            result["conflict"] = candidates[0]["confidence"] - candidates[1]["confidence"] < CONFLICT_MARGIN
+    return result

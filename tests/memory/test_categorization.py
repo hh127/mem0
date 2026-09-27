@@ -25,6 +25,7 @@ from mem0.memory.categorization import (
     build_categorization_prompt,
     categorize_memories,
     categorize_memory,
+    explain_categorization,
     normalize_catalog,
     parse_categorization_response,
 )
@@ -703,3 +704,123 @@ def test_async_search_surfaces_categories_as_a_top_level_field():
         results = asyncio.run(mem._search_vector_store("造价", {"user_id": "u1"}, 5))
 
     assert results[0]["categories"] == ["工作项目"]
+
+
+# --------------------------------------------------------------------------- #
+# 8. explain_categorization (the dashboard's category tester)
+# --------------------------------------------------------------------------- #
+
+
+def _candidates_response(*pairs):
+    """Build a ranked-candidates response: ``_candidates_response(("工作项目", 0.9, "why"), ...)``."""
+    return json.dumps(
+        {"candidates": [{"name": name, "confidence": score, "reason": reason} for name, score, reason in pairs]},
+        ensure_ascii=False,
+    )
+
+
+def test_explain_ranks_candidates_and_reports_the_top_one():
+    llm = ScriptedLLM([_candidates_response(("工作项目", 0.62, "在做的项目"), ("个人信息", 0.31, "工作背景"))])
+    result = explain_categorization(llm, "我在做造价审计项目", CATALOG, RULES)
+    assert result["error"] is None
+    assert result["top"] == "工作项目"
+    assert [c["name"] for c in result["candidates"]] == ["工作项目", "个人信息"]
+    assert result["candidates"][0]["reason"] == "在做的项目"
+
+
+def test_explain_sorts_by_confidence_not_by_response_order():
+    llm = ScriptedLLM([_candidates_response(("个人偏好", 0.2, "弱"), ("工作项目", 0.8, "强"))])
+    result = explain_categorization(llm, "文本", CATALOG)
+    assert [c["name"] for c in result["candidates"]] == ["工作项目", "个人偏好"]
+    assert result["top"] == "工作项目"
+
+
+def test_explain_flags_a_boundary_conflict_when_the_top_two_are_close():
+    llm = ScriptedLLM([_candidates_response(("个人偏好", 0.76, "偏好"), ("工作项目", 0.71, "决定"))])
+    result = explain_categorization(llm, "文本", CATALOG)
+    assert result["conflict"] is True
+
+
+def test_explain_does_not_flag_a_conflict_when_the_winner_is_clear():
+    llm = ScriptedLLM([_candidates_response(("个人偏好", 0.91, "偏好"), ("工作项目", 0.3, "决定"))])
+    result = explain_categorization(llm, "文本", CATALOG)
+    assert result["conflict"] is False
+
+
+def test_explain_drops_unknown_names_and_unusable_confidences():
+    """The tester must never show a category the catalog does not contain, nor a made-up score."""
+    response = json.dumps(
+        {
+            "candidates": [
+                {"name": "临时分类", "confidence": 0.99, "reason": "not in catalog"},
+                {"name": "工作项目", "confidence": "0.5", "reason": "string score is tolerated"},
+                {"name": "个人信息", "confidence": "high", "reason": "no numeric score"},
+            ]
+        },
+        ensure_ascii=False,
+    )
+    result = explain_categorization(ScriptedLLM([response]), "文本", CATALOG)
+    assert [c["name"] for c in result["candidates"]] == ["工作项目"]
+    assert result["candidates"][0]["confidence"] == 0.5
+
+
+def test_explain_clamps_confidence_into_the_unit_interval():
+    llm = ScriptedLLM([_candidates_response(("工作项目", 4.2, "over"), ("个人信息", -1, "under"))])
+    result = explain_categorization(llm, "文本", CATALOG)
+    assert [c["confidence"] for c in result["candidates"]] == [1.0, 0.0]
+
+
+def test_explain_tolerates_case_variants_of_ascii_names():
+    llm = ScriptedLLM([_candidates_response(("importantdecision", 0.8, "ascii"))])
+    result = explain_categorization(llm, "文本", CATALOG)
+    assert result["top"] == "ImportantDecision"
+
+
+def test_explain_handles_code_fenced_responses():
+    llm = ScriptedLLM(["```json\n" + _candidates_response(("工作项目", 0.9, "fenced")) + "\n```"])
+    assert explain_categorization(llm, "文本", CATALOG)["top"] == "工作项目"
+
+
+def test_explain_returns_no_candidates_on_garbage():
+    result = explain_categorization(ScriptedLLM(["完全不是 JSON"]), "文本", CATALOG)
+    assert result["candidates"] == []
+    assert result["top"] is None
+    assert result["conflict"] is False
+
+
+def test_explain_reports_llm_failure_instead_of_raising():
+    result = explain_categorization(ScriptedLLM([RuntimeError("provider down")]), "文本", CATALOG)
+    assert result["candidates"] == []
+    assert "分类模型调用失败" in result["error"]
+
+
+def test_explain_skips_the_llm_for_empty_text_or_empty_catalog():
+    llm = ScriptedLLM([_candidates_response(("工作项目", 0.9, "x"))])
+    assert explain_categorization(llm, "   ", CATALOG)["error"]
+    assert explain_categorization(llm, "文本", [])["error"]
+    assert llm.calls == []
+
+
+def test_explain_prompt_carries_the_catalog_and_the_rules():
+    llm = ScriptedLLM([_candidates_response(("工作项目", 0.9, "x"))])
+    explain_categorization(llm, "我在做造价审计项目", CATALOG, RULES)
+    call = llm.calls[0]
+    system_prompt = call["messages"][0]["content"]
+    assert "个人信息" in system_prompt
+    assert RULES[0] in system_prompt
+    assert call["messages"][1]["content"] == "我在做造价审计项目"
+    assert call["kwargs"].get("response_format") == {"type": "json_object"}
+
+
+def test_explain_caps_the_number_of_candidates():
+    llm = ScriptedLLM(
+        [
+            _candidates_response(
+                ("工作项目", 0.9, "a"),
+                ("个人信息", 0.8, "b"),
+                ("个人偏好", 0.7, "c"),
+                ("ImportantDecision", 0.6, "d"),
+            )
+        ]
+    )
+    assert len(explain_categorization(llm, "文本", CATALOG)["candidates"]) == 3

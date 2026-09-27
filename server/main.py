@@ -488,12 +488,30 @@ class CategoryCatalog(BaseModel):
         None,
         description=(
             "Full replacement for the project catalog. Entries are "
-            "[{\"name\": ..., \"description\": ...}] (or {\"name\": \"description\"} / bare names)."
+            "[{\"name\": ..., \"description\": ...}] (or {\"name\": \"description\"} / bare names); "
+            "an extra \"enabled\": false keeps the entry in the catalog but excludes it from classification."
         ),
     )
     custom_category_rules: Optional[List[str]] = Field(
         None, description="Ordered disambiguation rules injected into the categorization prompt."
     )
+
+
+def _enabled_entries(catalog: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Catalog entries the classifier may use (``enabled: false`` ones are UI-only)."""
+    return [entry for entry in catalog if not (isinstance(entry, dict) and entry.get("enabled") is False)]
+
+
+def _catalog_payload(catalog: List[Any], rules: List[str]) -> Dict[str, Any]:
+    names = [entry.get("name") for entry in catalog if isinstance(entry, dict) and entry.get("name")]
+    disabled = [entry.get("name") for entry in catalog if isinstance(entry, dict) and entry.get("enabled") is False]
+    return {
+        "custom_categories": catalog,
+        "custom_category_rules": rules,
+        "names": names,
+        "disabled": [name for name in disabled if name],
+        "enabled_count": len([name for name in names if name not in disabled]),
+    }
 
 
 @app.get("/categories", summary="Get the active category catalog")
@@ -505,11 +523,7 @@ def get_categories(_auth=Depends(verify_auth)):
     """
     config = get_current_config()
     catalog = config.get("custom_categories") or []
-    return {
-        "custom_categories": catalog,
-        "custom_category_rules": config.get("custom_category_rules") or [],
-        "names": [entry.get("name") for entry in catalog if isinstance(entry, dict)],
-    }
+    return _catalog_payload(catalog, config.get("custom_category_rules") or [])
 
 
 @app.post("/categories", summary="Replace the project category catalog")
@@ -529,7 +543,17 @@ def set_categories(body: CategoryCatalog, _auth=Depends(require_admin)):
             raise _client_error(e)
         if body.custom_categories and not normalized:
             raise HTTPException(status_code=400, detail="No usable categories in the provided catalog.")
-        updates["custom_categories"] = [{"name": name, "description": description} for name, description in normalized]
+        # normalize_catalog drops everything but (name, description); carry the UI-only
+        # "enabled" flag across so switching a category off survives the round trip.
+        disabled = {
+            str(entry["name"]).replace("\u3000", " ").strip()
+            for entry in (body.custom_categories or [])
+            if isinstance(entry, dict) and entry.get("name") and entry.get("enabled") is False
+        }
+        updates["custom_categories"] = [
+            {"name": name, "description": description, **({"enabled": False} if name in disabled else {})}
+            for name, description in normalized
+        ]
     if "custom_category_rules" in body.model_fields_set:
         updates["custom_category_rules"] = [
             str(rule).strip() for rule in (body.custom_category_rules or []) if str(rule).strip()
@@ -541,11 +565,39 @@ def set_categories(body: CategoryCatalog, _auth=Depends(require_admin)):
 
     updated = update_config(updates)
     catalog = updated.get("custom_categories") or []
-    return {
-        "custom_categories": catalog,
-        "custom_category_rules": updated.get("custom_category_rules") or [],
-        "names": [entry.get("name") for entry in catalog if isinstance(entry, dict)],
-    }
+    return _catalog_payload(catalog, updated.get("custom_category_rules") or [])
+
+
+class CategoryTestRequest(BaseModel):
+    text: str = Field(description="A sample memory text to classify.")
+    custom_categories: Optional[List[Dict[str, Any]]] = Field(
+        None, description="Optional catalog override — test a draft catalog before saving it."
+    )
+    custom_category_rules: Optional[List[str]] = Field(
+        None, description="Optional rules override, paired with custom_categories."
+    )
+
+
+@app.post("/categories/test", summary="Dry-run the classifier on a sample text")
+def test_category(req: CategoryTestRequest, _auth=Depends(require_admin)):
+    """Classify a sample WITHOUT writing anything: ranked candidates + reasons.
+
+    Powers the dashboard's category tester. Uses the project catalog unless the request
+    carries an override, so a draft catalog can be validated before it is saved.
+    """
+    from mem0.memory.categorization import explain_categorization
+
+    config = get_current_config()
+    catalog = req.custom_categories if req.custom_categories is not None else config.get("custom_categories")
+    rules = (
+        req.custom_category_rules
+        if req.custom_category_rules is not None
+        else config.get("custom_category_rules")
+    )
+    catalog = _enabled_entries(catalog or [])
+    result = explain_categorization(get_memory_instance().llm, req.text, catalog, rules)
+    result["catalog_size"] = len(catalog)
+    return result
 
 
 @app.get("/configure/providers", summary="List bundled LLM and embedder providers")
@@ -695,6 +747,9 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
         raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
 
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
+    if params.get("custom_categories"):
+        # A per-call catalog obeys the same disabled-flag rule as the project one.
+        params["custom_categories"] = _enabled_entries(params["custom_categories"])
     set_usage_context(user_id=memory_create.user_id, operation="add")
     try:
         response = get_memory_instance().add(messages=[m.model_dump() for m in memory_create.messages], **params)
