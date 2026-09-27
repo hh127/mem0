@@ -21,6 +21,11 @@ export const MEMORY_ENDPOINTS = {
   GENERATE_INSTRUCTIONS: "/generate-instructions",
 } as const;
 
+export const CATEGORY_ENDPOINTS = {
+  BASE: "/categories",
+  TEST: "/categories/test",
+} as const;
+
 export const API_KEY_ENDPOINTS = {
   BASE: "/api-keys",
   BY_ID: (keyId: string) => `/api-keys/${keyId}`,

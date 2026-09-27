@@ -1,7 +1,8 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { Pencil, Search, Trash2, X } from "lucide-react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { LayoutGrid, List, Pencil, Search, Trash2, X } from "lucide-react";
 import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,6 +14,9 @@ import { DataTable } from "@/components/shared/data-table";
 import { TableSkeleton } from "@/components/shared/table-skeleton";
 import { EmptyState } from "@/components/self-hosted/empty-state";
 import DeleteConfirmationModal from "@/components/ui/delete-confirmation-modal";
+import { CategoryTag } from "@/components/categories/category-tag";
+import { MemoryCard } from "@/components/categories/memory-card";
+import { countByCategory } from "@/lib/category-utils";
 import {
   Sheet,
   SheetContent,
@@ -32,6 +36,15 @@ const PAGE_SIZE = 20;
 const MEMORY_FETCH_LIMIT = 1000;
 
 export default function MemoriesPage() {
+  return (
+    <Suspense fallback={<TableSkeleton rows={5} columns={4} />}>
+      <MemoriesContent />
+    </Suspense>
+  );
+}
+
+function MemoriesContent() {
+  const searchParams = useSearchParams();
   const [userId, setUserId] = useState("");
   const [selectedMemory, setSelectedMemory] = useState<Memory | null>(null);
   const [memoryToDelete, setMemoryToDelete] = useState<Memory | null>(null);
@@ -44,11 +57,23 @@ export default function MemoriesPage() {
   const [activeSearch, setActiveSearch] = useState("");
   // 重排开关：默认开（语义搜索先用向量召回，再用重排模型精排）
   const [useRerank, setUseRerank] = useState(true);
+  // 分类筛选（来自 URL 或点击统计卡片）；卡片视图是首页的默认呈现
+  const [activeCategory, setActiveCategory] = useState<string | null>(
+    searchParams?.get("category") ?? null,
+  );
+  const [view, setView] = useState<"cards" | "table">("cards");
   // 用 ref 存查询词：提交后立即 refetch，此时 state 还没更新完
   const searchQueryRef = useRef("");
   const rerankRef = useRef(true);
   const [page, setPage] = useState(0);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
+  const categoryParam = searchParams?.get("category") ?? null;
+
+  // 分类筛选跟着 URL 走（统计卡片是链接），换分类时回到第一页
+  useEffect(() => {
+    setActiveCategory(categoryParam);
+    setPage(0);
+  }, [categoryParam]);
 
   const {
     data: memories = [],
@@ -107,8 +132,29 @@ export default function MemoriesPage() {
     { errorToast: "记忆加载失败", initialData: [] },
   );
 
-  const totalPages = Math.ceil(memories.length / PAGE_SIZE);
-  const paginatedMemories = memories.slice(
+  // 分类统计：直接用已拉取的记忆算，不额外请求；点击卡片即筛选
+  const categoryStats = useMemo(() => {
+    const counts = countByCategory(memories);
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 8);
+  }, [memories]);
+
+  const uncategorizedCount = useMemo(
+    () => memories.filter((memory) => (memory.categories ?? []).length === 0).length,
+    [memories],
+  );
+
+  const displayMemories = useMemo(
+    () =>
+      activeCategory
+        ? memories.filter((memory) => (memory.categories ?? []).includes(activeCategory))
+        : memories,
+    [memories, activeCategory],
+  );
+
+  const totalPages = Math.ceil(displayMemories.length / PAGE_SIZE);
+  const paginatedMemories = displayMemories.slice(
     page * PAGE_SIZE,
     (page + 1) * PAGE_SIZE,
   );
@@ -276,7 +322,64 @@ export default function MemoriesPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold font-fustat">记忆</h1>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold font-fustat">我的记忆</h1>
+          <p className="text-sm text-onSurface-default-tertiary mt-1">
+            共 {memories.length} 条
+            {activeCategory ? `，其中「${activeCategory}」${displayMemories.length} 条` : ""}
+            {uncategorizedCount > 0 ? ` · 未归类 ${uncategorizedCount} 条` : ""}
+          </p>
+        </div>
+        <div className="flex items-center gap-1 rounded-md border border-memBorder-primary p-0.5">
+          <Button
+            variant={view === "cards" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 px-2 text-xs"
+            onClick={() => setView("cards")}
+          >
+            <LayoutGrid className="size-3.5 mr-1" />
+            卡片
+          </Button>
+          <Button
+            variant={view === "table" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 px-2 text-xs"
+            onClick={() => setView("table")}
+          >
+            <List className="size-3.5 mr-1" />
+            表格
+          </Button>
+        </div>
+      </div>
+
+      {(categoryStats.length > 0 || uncategorizedCount > 0) && (
+        <div className="flex flex-wrap items-center gap-2">
+          <CategoryTag
+            name="全部"
+            count={memories.length}
+            active={activeCategory === null}
+            href="/dashboard/memories"
+          />
+          {categoryStats.map(([name, count]) => (
+            <CategoryTag
+              key={name}
+              name={name}
+              count={count}
+              active={activeCategory === name}
+              href={`/dashboard/memories?category=${encodeURIComponent(name)}`}
+            />
+          ))}
+          {uncategorizedCount > 0 && (
+            <span className="typo-caption-sm text-onSurface-default-tertiary">
+              未归类 {uncategorizedCount}
+            </span>
+          )}
+          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" asChild>
+            <a href="/dashboard/categories">全部分类 →</a>
+          </Button>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-3">
         <Input
@@ -318,19 +421,25 @@ export default function MemoriesPage() {
 
       {activeSearch && (
         <p className="text-sm text-onSurface-default-tertiary">
-          搜索「{activeSearch}」—— 命中 {memories.length} 条，按相关度排序
+          搜索「{activeSearch}」—— 命中 {displayMemories.length} 条，按相关度排序
           {useRerank ? "（已用重排模型精排）" : "（仅向量召回，未重排）"}
           {userId.trim() ? `（限用户 ${userId.trim()}）` : ""}
+          {activeCategory ? `（限分类「${activeCategory}」）` : ""}
         </p>
       )}
 
       {isLoading ? (
         <TableSkeleton rows={5} columns={4} />
-      ) : memories.length === 0 ? (
+      ) : displayMemories.length === 0 ? (
         activeSearch ? (
           <EmptyState
             title="没有匹配的记忆"
             description={`没有找到与「${activeSearch}」相关的记忆，换个说法试试。`}
+          />
+        ) : activeCategory ? (
+          <EmptyState
+            title={`「${activeCategory}」下还没有记忆`}
+            description="这个分类暂时没有已打标的记忆。写入新记忆时会由分类模型自动归入。"
           />
         ) : (
           <EmptyState
@@ -355,6 +464,22 @@ export default function MemoriesPage() {
         )
       ) : (
         <>
+          {view === "cards" ? (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {paginatedMemories.map((memory) => (
+                <MemoryCard
+                  key={memory.id}
+                  memory={memory}
+                  onOpen={(row) => {
+                    setSelectedMemory(row);
+                    setIsEditing(false);
+                    setExpiryInput(row.expiration_date ?? "");
+                  }}
+                  onEdit={startEditing}
+                />
+              ))}
+            </div>
+          ) : (
           <Card className="border-memBorder-primary overflow-hidden">
             <DataTable
               data={paginatedMemories}
@@ -372,12 +497,13 @@ export default function MemoriesPage() {
               }
             />
           </Card>
+          )}
           {totalPages > 1 && (
             <div className="flex items-center justify-between text-sm text-onSurface-default-tertiary">
               <span>
                 {page * PAGE_SIZE + 1}–
-                {Math.min((page + 1) * PAGE_SIZE, memories.length)} of{" "}
-                {memories.length}
+                {Math.min((page + 1) * PAGE_SIZE, displayMemories.length)} of{" "}
+                {displayMemories.length}
               </span>
               <div className="flex gap-2">
                 <Button

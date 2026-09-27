@@ -9,6 +9,39 @@ export interface Memory {
   score?: number;
   /** 到期日（YYYY-MM-DD，UTC，含当天）。缺省/为空 = 永不过期。 */
   expiration_date?: string | null;
+  /** 写入时由分类器自动打的标签（顶层字段，与官方 Platform 对齐）。 */
+  categories?: string[] | null;
+}
+
+export interface CategoryEntry {
+  name: string;
+  description: string;
+  /** false = 保留在目录里但不再参与分类（已存在的标签不受影响）。 */
+  enabled?: boolean;
+}
+
+export interface CategoryCatalog {
+  custom_categories: CategoryEntry[];
+  custom_category_rules: string[];
+  names: string[];
+  /** 已停用的分类名（与 custom_categories 里 enabled:false 的条目一致）。 */
+  disabled: string[];
+  enabled_count: number;
+}
+
+export interface CategoryCandidate {
+  name: string;
+  confidence: number;
+  reason: string;
+}
+
+export interface CategoryTestResult {
+  candidates: CategoryCandidate[];
+  top: string | null;
+  /** top1 与 top2 分差过小 = 落在分类边界上，值得人工确认。 */
+  conflict: boolean;
+  error: string | null;
+  catalog_size: number;
 }
 
 export interface ApiKey {
