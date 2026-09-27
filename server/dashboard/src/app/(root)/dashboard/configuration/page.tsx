@@ -24,6 +24,7 @@ import {
   buildLlmConfig,
   buildRerankerConfig,
   getEffectiveConfig,
+  OPENCODE_BASE_URL,
   parseOptionalNumber,
 } from "@/utils/self-hosted-config";
 import { useAuth } from "@/hooks/use-auth";
@@ -345,6 +346,10 @@ export default function ConfigurationPage() {
                 onValueChange={(value) => {
                   setLlmProvider(value);
                   setLlmApiKey("");
+                  // OpenCode's relay endpoint is fixed per pool — prefill it so the
+                  // admin only needs a key. The server adds the relay's required
+                  // x-opencode-session / User-Agent headers automatically.
+                  if (value === "opencode") setLlmBaseUrl(OPENCODE_BASE_URL);
                 }}
                 disabled={!isAdmin || !providers}
               >
@@ -375,11 +380,22 @@ export default function ConfigurationPage() {
               Base URL（兼容 OpenAI 协议的地址）
             </Label>
             <Input
-              placeholder="https://api.deepseek.com/v1"
+              placeholder={
+                llmProvider === "opencode"
+                  ? OPENCODE_BASE_URL
+                  : "https://api.deepseek.com/v1"
+              }
               value={llmBaseUrl}
               onChange={(e) => setLlmBaseUrl(e.target.value)}
               disabled={!isAdmin}
             />
+            {llmProvider === "opencode" && (
+              <p className="text-xs text-onSurface-default-tertiary">
+                OpenCode 中转地址固定；服务器会自动补上它要求的
+                x-opencode-session / User-Agent 请求头。模型填 mimo-v2.6-flash
+                等，max_tokens 不要超过 131072（超出会被上游拒绝）。
+              </p>
+            )}
           </div>
           <div className="space-y-1">
             <Label className="text-xs">API 密钥</Label>

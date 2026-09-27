@@ -10,6 +10,18 @@ from mem0.configs.llms.openai import OpenAIConfig
 from mem0.llms.base import LLMBase
 from mem0.memory.utils import extract_json
 
+# The OpenCode relay (opencode.ai/zen/*) demands two headers on every request:
+#   x-opencode-session — routing affinity; any stable opaque value works (it pins a
+#                        conversation to one backend so its prompt cache stays warm)
+#   User-Agent         — Cloudflare rejects header-less clients with 403 (code 1010)
+# Without them a perfectly valid key gets 400 MissingSessionID / 403. Injected for any
+# base_url under opencode.ai so both the `opencode` provider and a hand-written
+# `openai` + opencode URL work; config.default_headers always wins over these defaults.
+_OPENCODE_DEFAULT_HEADERS = {
+    "x-opencode-session": "mem0-selfhosted",
+    "User-Agent": "mem0-selfhosted/1.0",
+}
+
 
 class OpenAILLM(LLMBase):
     def __init__(self, config: Optional[Union[BaseLlmConfig, OpenAIConfig, Dict]] = None):
@@ -32,6 +44,7 @@ class OpenAILLM(LLMBase):
                 reasoning_effort=getattr(config, 'reasoning_effort', None),
                 http_client_proxies=config.http_client_proxies,
                 is_reasoning_model=getattr(config, 'is_reasoning_model', None),
+                default_headers=getattr(config, 'default_headers', None),
             )
 
         super().__init__(config)
@@ -45,12 +58,25 @@ class OpenAILLM(LLMBase):
                 base_url=self.config.openrouter_base_url
                 or os.getenv("OPENROUTER_API_BASE")
                 or "https://openrouter.ai/api/v1",
+                default_headers=getattr(self.config, "default_headers", None) or None,
             )
         else:
             api_key = self.config.api_key or os.getenv("OPENAI_API_KEY")
-            base_url = self.config.openai_base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+            # .strip() — a leading/trailing space from a copy-pasted dashboard value
+            # makes httpx fail the request outright ("Connection error."), not a 4xx.
+            base_url = (
+                self.config.openai_base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+            ).strip()
 
-            self.client = OpenAI(api_key=api_key, base_url=base_url)
+            # Inject the relay's required headers; explicit config.default_headers wins.
+            headers = dict(_OPENCODE_DEFAULT_HEADERS) if "opencode.ai" in base_url else {}
+            headers.update(getattr(self.config, "default_headers", None) or {})
+
+            self.client = OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                default_headers=headers or None,
+            )
 
     def _parse_response(self, response, tools):
         """

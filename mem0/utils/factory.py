@@ -43,6 +43,11 @@ class LlmFactory:
     provider_to_class = {
         "ollama": ("mem0.llms.ollama.OllamaLLM", OllamaConfig),
         "openai": ("mem0.llms.openai.OpenAILLM", OpenAIConfig),
+        # OpenCode relay (opencode.ai/zen/*) — OpenAI-compatible wire format, but it
+        # requires x-opencode-session + User-Agent headers. OpenAILLM injects those
+        # automatically for any base_url under opencode.ai, so this entry is just the
+        # provider name users pick in the dashboard.
+        "opencode": ("mem0.llms.openai.OpenAILLM", OpenAIConfig),
         "groq": ("mem0.llms.groq.GroqLLM", BaseLlmConfig),
         "together": ("mem0.llms.together.TogetherLLM", BaseLlmConfig),
         "aws_bedrock": ("mem0.llms.aws_bedrock.AWSBedrockLLM", AWSBedrockConfig),

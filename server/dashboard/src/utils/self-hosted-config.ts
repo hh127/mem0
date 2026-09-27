@@ -27,6 +27,18 @@ export const RERANKER_PROVIDERS = [
   "zero_entropy",
 ] as const;
 
+/**
+ * OpenCode's relay has one fixed endpoint per pool (Go here), so picking the
+ * `opencode` provider is enough — leaving Base URL blank would otherwise fall back
+ * to api.openai.com and fail confusingly. The server injects the relay's required
+ * `x-opencode-session` / `User-Agent` headers automatically for any opencode.ai URL.
+ */
+export const OPENCODE_BASE_URL = "https://opencode.ai/zen/go/v1";
+
+/** Fill in the OpenCode endpoint when the admin picked that provider but left Base URL empty. */
+export const resolveLlmBaseUrl = (provider: string, baseUrl?: string) =>
+  provider === "opencode" && !baseUrl?.trim() ? OPENCODE_BASE_URL : baseUrl;
+
 export const getEffectiveConfig = (data: unknown): EffectiveConfig | null => {
   if (!data || typeof data !== "object") {
     return null;
@@ -104,7 +116,7 @@ export const buildLlmConfig = ({
     config: compact({
       model,
       api_key: apiKey,
-      openai_base_url: baseUrl,
+      openai_base_url: resolveLlmBaseUrl(provider, baseUrl),
       temperature,
       max_tokens: maxTokens,
     }),
