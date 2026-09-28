@@ -1,0 +1,82 @@
+name: Fork Tests
+
+# 这个 fork 的回归门禁。docker-build.yml 只构建镜像（里面 next build 会挡类型错误），
+# 但没有任何 job 跑过 pytest —— 这里补上，避免「CI 绿 = 逻辑没坏」的误解。
+#
+# 只跑依赖轻、跑得快的两个包：
+#   - tests/memory/（上游内存层 + 本 fork 的分类器，458 项，约 8 秒）
+#   - tests/test_server_memory_categories.py（本 fork 的 REST 行为，12 项，约 1 分钟，
+#     慢在 server.main 的 import 会重导 mem0 全家桶）
+# ⚠️ 不跑全量 tests/：vector_stores / llms / embeddings 里有一批可选 provider 的用例
+#    需要额外重依赖（weaviate/pinecone/together 等），装齐了不划算。
+# ⚠️ tests/test_server_params.py 也能跑了（tests/conftest.py 提供了默认环境），
+#    但每个用例都要 reload server.main（约 50 秒/次），不进 CI。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "mem0/**"
+      - "server/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/fork-tests.yml"
+  pull_request:
+    paths:
+      - "mem0/**"
+      - "server/**"
+      - "tests/**"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest pytest-mock pytest-asyncio \
+            "fastapi==0.115.8" "pydantic[email]==2.10.4" python-dotenv requests \
+            "psycopg[binary]" psycopg-pool sqlalchemy "passlib[bcrypt]" \
+            "bcrypt==4.0.1" "python-jose[cryptography]" cryptography slowapi
+
+      - name: Run tests
+        # PYTHONPATH 要同时含仓库根（mem0 包）和 server/（telemetry/auth 是顶层模块）
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/server
+        run: pytest tests/memory tests/test_server_memory_categories.py -q
+
+  dashboard-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: server/dashboard/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # ⚠️ 不加 `pnpm lint`（prettier --check）：仓库里 13 个源文件是按旧版 prettier 格式写的，
+      # 当前版本（3.8.x，package.json 为 ^3.5.2）会重排约 270 行。要开这个门禁，先固定 prettier 版本
+      # 并跑一次全量 `prettier --write`，否则 CI 会一直红。

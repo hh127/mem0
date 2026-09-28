@@ -107,17 +107,8 @@ function MemoriesContent() {
         if (selectedUser) {
           idList = [selectedUser];
         } else {
-          const all = await api.get(MEMORY_ENDPOINTS.BASE, {
-            params: { top_k: MEMORY_FETCH_LIMIT },
-          });
-          const allRaw = all.data?.results ?? all.data ?? [];
-          idList = Array.from(
-            new Set(
-              (Array.isArray(allRaw) ? allRaw : [])
-                .map((m: Memory) => m.user_id)
-                .filter((v): v is string => !!v),
-            ),
-          );
+          // 复用下拉已经拿到的用户列表（不再为了枚举 user_id 额外拉一次全量记忆）
+          idList = options.map((option) => option.id);
         }
         if (idList.length === 0) return [];
         const responses = await Promise.all(
@@ -156,7 +147,10 @@ function MemoriesContent() {
       const res = await api.get(ENTITY_ENDPOINTS.BASE);
       return Array.isArray(res.data) ? (res.data as Entity[]) : [];
     },
-    { initialData: [] },
+    {
+      initialData: [],
+      errorToast: "用户列表加载失败（下拉里只剩「全部用户」）",
+    },
   );
   const options = useMemo(
     () => withCurrentUser(userOptions(entities), userId),
