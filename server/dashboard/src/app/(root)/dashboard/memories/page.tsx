@@ -9,6 +9,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Card } from "@/components/ui/card";
 import { DataTable } from "@/components/shared/data-table";
 import { TableSkeleton } from "@/components/shared/table-skeleton";
@@ -19,6 +26,13 @@ import { MemoryCard } from "@/components/categories/memory-card";
 import { MemoryCategoriesEditor } from "@/components/categories/memory-categories-editor";
 import { countByCategory } from "@/lib/category-utils";
 import {
+  ALL_USERS,
+  selectionToUserId,
+  userOptions,
+  userIdToSelection,
+  withCurrentUser,
+} from "@/lib/memory-filters";
+import {
   Sheet,
   SheetContent,
   SheetHeader,
@@ -28,9 +42,9 @@ import {
 import { toast } from "@/components/ui/use-toast";
 import { getErrorMessage } from "@/lib/error-message";
 import { api } from "@/utils/api";
-import { MEMORY_ENDPOINTS } from "@/utils/api-endpoints";
+import { MEMORY_ENDPOINTS, ENTITY_ENDPOINTS } from "@/utils/api-endpoints";
 import { useApiQuery } from "@/hooks/use-api-query";
-import { Memory } from "@/types/api";
+import { Entity, Memory } from "@/types/api";
 
 const PAGE_SIZE = 20;
 // Keep in sync with ALL_MEMORIES_LIMIT in server/main.py.
@@ -66,6 +80,8 @@ function MemoriesContent() {
   // 用 ref 存查询词：提交后立即 refetch，此时 state 还没更新完
   const searchQueryRef = useRef("");
   const rerankRef = useRef(true);
+  // 同上：下拉切换后立刻 refetch，state 来不及更新
+  const userIdRef = useRef("");
   const [page, setPage] = useState(0);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
   const categoryParam = searchParams?.get("category") ?? null;
@@ -83,12 +99,13 @@ function MemoriesContent() {
   } = useApiQuery<Memory[]>(
     async () => {
       const query = searchQueryRef.current.trim();
+      const selectedUser = userIdRef.current.trim();
       if (query) {
         // 后端要求 filters 至少含一个实体（user_id/agent_id/run_id），不能空手搜。
         // 用户没指定就取全量列表里出现过的所有 user_id，分别搜再合并。
         let idList: string[] = [];
-        if (userId.trim()) {
-          idList = [userId.trim()];
+        if (selectedUser) {
+          idList = [selectedUser];
         } else {
           const all = await api.get(MEMORY_ENDPOINTS.BASE, {
             params: { top_k: MEMORY_FETCH_LIMIT },
@@ -123,14 +140,27 @@ function MemoriesContent() {
           .filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)))
           .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
       }
-      const params = userId.trim()
-        ? { user_id: userId.trim(), top_k: MEMORY_FETCH_LIMIT }
+      const params = selectedUser
+        ? { user_id: selectedUser, top_k: MEMORY_FETCH_LIMIT }
         : { top_k: MEMORY_FETCH_LIMIT };
       const res = await api.get(MEMORY_ENDPOINTS.BASE, { params });
       const raw = res.data?.results ?? res.data ?? [];
       return Array.isArray(raw) ? raw : [];
     },
     { errorToast: "记忆加载失败", initialData: [] },
+  );
+
+  // 用户下拉的选项：来自 /entities（只取 type=user），不随筛选变化
+  const { data: entities = [] } = useApiQuery<Entity[]>(
+    async () => {
+      const res = await api.get(ENTITY_ENDPOINTS.BASE);
+      return Array.isArray(res.data) ? (res.data as Entity[]) : [];
+    },
+    { initialData: [] },
+  );
+  const options = useMemo(
+    () => withCurrentUser(userOptions(entities), userId),
+    [entities, userId],
   );
 
   // 分类统计：直接用已拉取的记忆算，不额外请求；点击卡片即筛选
@@ -394,18 +424,29 @@ function MemoriesContent() {
       )}
 
       <div className="flex flex-wrap items-center gap-3">
-        <Input
-          placeholder="按用户 ID 筛选（可选）"
-          value={userId}
-          onChange={(e) => setUserId(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              setPage(0);
-              refetch();
-            }
+        <Select
+          value={userIdToSelection(userId)}
+          onValueChange={(value) => {
+            const next = selectionToUserId(value);
+            userIdRef.current = next;
+            setUserId(next);
+            setPage(0);
+            void refetch();
           }}
-          className="w-56"
-        />
+        >
+          <SelectTrigger className="w-56" aria-label="按用户筛选">
+            <SelectValue placeholder="全部用户" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL_USERS}>全部用户</SelectItem>
+            {options.map((option) => (
+              <SelectItem key={option.id} value={option.id}>
+                {option.id}
+                {option.total >= 0 ? `（${option.total} 条）` : ""}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Input
           placeholder="搜索记忆内容（按意思搜，回车执行）"
           value={searchInput}
