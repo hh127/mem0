@@ -26,6 +26,38 @@ export function memoriesWithCategory(
     .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
 }
 
+export interface CategoryLink {
+  source: string;
+  target: string;
+  count: number;
+}
+
+/**
+ * Category pairs sharing at least one memory — the edges of the memory map.
+ * A high count means the two categories overlap in practice, which usually points at
+ * descriptions that need sharpening.
+ */
+export function coOccurrence(memories: Memory[]): CategoryLink[] {
+  const pairs = new Map<string, CategoryLink>();
+  for (const memory of memories) {
+    const tags = Array.from(new Set(categoriesOf(memory))).sort();
+    for (let i = 0; i < tags.length; i += 1) {
+      for (let j = i + 1; j < tags.length; j += 1) {
+        const key = `${tags[i]}\u0000${tags[j]}`;
+        const existing = pairs.get(key);
+        if (existing) existing.count += 1;
+        else pairs.set(key, { source: tags[i], target: tags[j], count: 1 });
+      }
+    }
+  }
+  return Array.from(pairs.values()).sort(
+    (a, b) =>
+      b.count - a.count ||
+      a.source.localeCompare(b.source) ||
+      a.target.localeCompare(b.target),
+  );
+}
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -51,8 +83,7 @@ export function expiryLabel(memory: Memory): {
   longTerm: boolean;
 } {
   const value = memory.expiration_date;
-  if (!value)
-    return { text: "长期", expired: false, longTerm: true };
+  if (!value) return { text: "长期", expired: false, longTerm: true };
   const today = new Date().toISOString().slice(0, 10);
   return { text: value, expired: value < today, longTerm: false };
 }

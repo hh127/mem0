@@ -10,6 +10,7 @@ import {
   GalleryVerticalEnd,
   Gauge,
   KeyRound,
+  Network,
   Settings,
   Settings2,
   Tag,
@@ -42,6 +43,7 @@ interface NavEntry {
 
 const MEMORY_NAV: NavEntry[] = [
   { title: "我的记忆", url: "/dashboard/memories", icon: GalleryVerticalEnd },
+  { title: "记忆地图", url: "/dashboard/map", icon: Network },
 ];
 
 const ADMIN_NAV: NavEntry[] = [
