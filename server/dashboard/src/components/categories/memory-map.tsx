@@ -6,7 +6,16 @@ import { ArrowUpRight, Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { coOccurrence } from "@/lib/category-utils";
-import { buildLayout, VIEW_H, VIEW_W } from "@/lib/memory-map-layout";
+import {
+  buildLayout,
+  EDGE_COLORS,
+  EMPTY_NODE_COLOR,
+  NODE_COLOR,
+  NODE_COLOR_STRONG,
+  VIEW_H,
+  VIEW_W,
+  edgeColorFor,
+} from "@/lib/memory-map-layout";
 import type { CategoryStat } from "@/hooks/use-category-catalog";
 import type { Memory } from "@/types/api";
 
@@ -59,9 +68,25 @@ export function MemoryMap({
           <Info className="size-3.5" />
           圈的面积 = 该类记忆条数
         </span>
-        <span>连线 = 同一条记忆同时命中两类（越粗共现越多）</span>
+        <span>连线颜色/粗细 = 共现次数</span>
         <span>灰色虚线圈 = 空分类</span>
         <span className="tabular-nums">共现连线 {links.length} 条</span>
+        {/* 连线色阶图例：颜色按共现强度分档 */}
+        <span className="flex items-center gap-1.5">
+          {EDGE_COLORS.map((color, index) => (
+            <span key={color} className="flex items-center gap-1">
+              <span
+                aria-hidden
+                className="inline-block h-1 w-5 rounded-full"
+                style={{ backgroundColor: color }}
+              />
+              <span className="tabular-nums">
+                {index + 1 === EDGE_COLORS.length ? `${index + 1}+` : index + 1}
+              </span>
+            </span>
+          ))}
+          <span>次共现</span>
+        </span>
       </div>
 
       <div className="flex flex-col gap-3 lg:flex-row">
@@ -87,13 +112,13 @@ export function MemoryMap({
                       y1={edge.ay}
                       x2={edge.bx}
                       y2={edge.by}
-                      stroke="var(--surface-default-brand)"
-                      strokeWidth={1 + edge.count * 0.7}
+                      stroke={edgeColorFor(edge.count)}
+                      strokeWidth={Number((1 + edge.count * 0.7).toFixed(2))}
                       strokeLinecap="round"
                       opacity={
                         highlighted
-                          ? Math.min(0.18 + edge.count * 0.16, 0.7)
-                          : 0.05
+                          ? Math.min(0.45 + edge.count * 0.15, 0.9)
+                          : 0.06
                       }
                     />
                   );
@@ -130,16 +155,14 @@ export function MemoryMap({
                         cx={node.x}
                         cy={node.y}
                         r={node.r}
-                        fill={
-                          isEmpty
-                            ? "transparent"
-                            : "var(--surface-default-brand)"
-                        }
+                        fill={isEmpty ? "transparent" : NODE_COLOR}
                         fillOpacity={isActive ? 0.34 : isEmpty ? 0 : 0.15}
                         stroke={
                           isEmpty
-                            ? "var(--on-surface-default-tertiary)"
-                            : "var(--surface-default-brand)"
+                            ? EMPTY_NODE_COLOR
+                            : isActive
+                              ? NODE_COLOR_STRONG
+                              : NODE_COLOR
                         }
                         strokeWidth={isActive ? 2.4 : 1.6}
                         strokeDasharray={isEmpty ? "5 4" : undefined}
@@ -217,7 +240,14 @@ export function MemoryMap({
                           className="flex w-full items-center justify-between rounded-md px-2 py-1 text-left text-xs hover:bg-surface-default-secondary-hover"
                         >
                           <span>{neighbor.name}</span>
-                          <span className="tabular-nums text-onSurface-default-tertiary">
+                          <span className="flex items-center gap-1.5 tabular-nums text-onSurface-default-tertiary">
+                            <span
+                              aria-hidden
+                              className="inline-block h-1 w-4 rounded-full"
+                              style={{
+                                backgroundColor: edgeColorFor(neighbor.count),
+                              }}
+                            />
                             共现 {neighbor.count}
                           </span>
                         </button>

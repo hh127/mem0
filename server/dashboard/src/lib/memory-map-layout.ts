@@ -14,6 +14,28 @@ const ITERATIONS = 520;
 const NODE_GAP = 30;
 const EMPTY_RADIUS = 10;
 
+/**
+ * 连线配色：按共现强度分档，同色系递进（浅蓝 → 靛蓝 → 紫 → 品红），
+ * 与 usage 页图表同族。刻意不做「每条边一个颜色」——12 条边就是 12 种颜色，
+ * 会变成数据看板；强度分档既能区分强弱，也能照样追溯哪条连哪条。
+ */
+export const EDGE_COLORS = ["#93c5fd", "#6366f1", "#8b5cf6", "#d946ef"];
+
+/** 共现次数 → 连线颜色（1/2/3/≥4 次分别取色阶的一档） */
+export function edgeColorFor(count: number): string {
+  const tier = Math.min(Math.max(Math.round(count), 1), EDGE_COLORS.length);
+  return EDGE_COLORS[tier - 1];
+}
+
+/**
+ * 圆点用色：写死不变量取值。
+ * ⚠️ 不要用 `--surface-*` 这类 token 画形状 —— 它们是「背景色」，
+ * 浅色模式下 --surface-default-brand 是 #f7f2ff（近白），画出来等于看不见。
+ */
+export const NODE_COLOR = "#8b5cf6";
+export const NODE_COLOR_STRONG = "#6d28d9";
+export const EMPTY_NODE_COLOR = "#a1a1aa";
+
 export interface LayoutInputNode {
   name: string;
   description: string;
