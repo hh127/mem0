@@ -314,8 +314,43 @@ class MemoryCreate(BaseModel):
 
 class MemoryUpdate(BaseModel):
     text: Optional[str] = Field(None, description="New content to update the memory with.")
-    metadata: Optional[Dict[str, Any]] = Field(None, description="Metadata to update.")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Metadata to update the memory.")
     expiration_date: Optional[str] = Field(None, description="Expiration date in YYYY-MM-DD format, or null to clear.")
+    categories: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Replace the memory's category tags with this list (trimmed, de-duplicated). "
+            "Pass [] to clear all tags. Omit the field to leave tags untouched."
+        ),
+    )
+
+
+# 手工打标的上限：分类目录是 18 个，给足余量但挡住误传的巨型数组。
+MAX_MANUAL_CATEGORIES = 20
+
+
+def _normalize_manual_categories(value: Optional[List[str]]) -> List[str]:
+    """Clean a caller-supplied tag list: trim, drop blanks, de-duplicate, cap the count.
+
+    Fail loudly on wrong shapes so the REST layer can answer 400 instead of writing junk
+    into the payload (tags are queried by ``filters={"categories": {"contains": ...}}``,
+    so stray values would silently break filtering).
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("categories must be a list of category names")
+    cleaned: List[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("each category name must be a string")
+        name = item.strip()
+        if not name or name in cleaned:
+            continue
+        cleaned.append(name)
+        if len(cleaned) > MAX_MANUAL_CATEGORIES:
+            raise ValueError(f"too many categories (max {MAX_MANUAL_CATEGORIES})")
+    return cleaned
 
 
 class SearchRequest(BaseModel):
@@ -880,16 +915,25 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 
 @app.put("/memories/{memory_id}", summary="Update a memory")
 def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(verify_auth)):
-    """Update an existing memory."""
+    """Update an existing memory.
+
+    ``categories`` is a top-level payload field (same level as ``data``), so a manual
+    re-tag rides the existing metadata merge inside ``Memory.update`` — the caller's
+    metadata, if any, is preserved.
+    """
     try:
         fields_set = getattr(updated_memory, "model_fields_set", getattr(updated_memory, "__fields_set__", set()))
-        params = {"memory_id": memory_id}
+        params: Dict[str, Any] = {"memory_id": memory_id}
         if "text" in fields_set:
             params["data"] = updated_memory.text
         if "metadata" in fields_set:
             params["metadata"] = updated_memory.metadata
         if "expiration_date" in fields_set:
             params["expiration_date"] = updated_memory.expiration_date
+        if "categories" in fields_set:
+            merged_metadata = dict(params.get("metadata") or {})
+            merged_metadata["categories"] = _normalize_manual_categories(updated_memory.categories)
+            params["metadata"] = merged_metadata
         return get_memory_instance().update(**params)
     except (ValueError, Mem0ValidationError) as e:
         raise _client_error(e)

@@ -16,6 +16,7 @@ import { EmptyState } from "@/components/self-hosted/empty-state";
 import DeleteConfirmationModal from "@/components/ui/delete-confirmation-modal";
 import { CategoryTag } from "@/components/categories/category-tag";
 import { MemoryCard } from "@/components/categories/memory-card";
+import { MemoryCategoriesEditor } from "@/components/categories/memory-categories-editor";
 import { countByCategory } from "@/lib/category-utils";
 import {
   Sheet,
@@ -141,14 +142,18 @@ function MemoriesContent() {
   }, [memories]);
 
   const uncategorizedCount = useMemo(
-    () => memories.filter((memory) => (memory.categories ?? []).length === 0).length,
+    () =>
+      memories.filter((memory) => (memory.categories ?? []).length === 0)
+        .length,
     [memories],
   );
 
   const displayMemories = useMemo(
     () =>
       activeCategory
-        ? memories.filter((memory) => (memory.categories ?? []).includes(activeCategory))
+        ? memories.filter((memory) =>
+            (memory.categories ?? []).includes(activeCategory),
+          )
         : memories,
     [memories, activeCategory],
   );
@@ -327,7 +332,9 @@ function MemoriesContent() {
           <h1 className="text-xl font-semibold font-fustat">我的记忆</h1>
           <p className="text-sm text-onSurface-default-tertiary mt-1">
             共 {memories.length} 条
-            {activeCategory ? `，其中「${activeCategory}」${displayMemories.length} 条` : ""}
+            {activeCategory
+              ? `，其中「${activeCategory}」${displayMemories.length} 条`
+              : ""}
             {uncategorizedCount > 0 ? ` · 未归类 ${uncategorizedCount} 条` : ""}
           </p>
         </div>
@@ -375,7 +382,12 @@ function MemoriesContent() {
               未归类 {uncategorizedCount}
             </span>
           )}
-          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            asChild
+          >
             <a href="/dashboard/categories">全部分类 →</a>
           </Button>
         </div>
@@ -421,7 +433,8 @@ function MemoriesContent() {
 
       {activeSearch && (
         <p className="text-sm text-onSurface-default-tertiary">
-          搜索「{activeSearch}」—— 命中 {displayMemories.length} 条，按相关度排序
+          搜索「{activeSearch}」—— 命中 {displayMemories.length}{" "}
+          条，按相关度排序
           {useRerank ? "（已用重排模型精排）" : "（仅向量召回，未重排）"}
           {userId.trim() ? `（限用户 ${userId.trim()}）` : ""}
           {activeCategory ? `（限分类「${activeCategory}」）` : ""}
@@ -480,23 +493,23 @@ function MemoriesContent() {
               ))}
             </div>
           ) : (
-          <Card className="border-memBorder-primary overflow-hidden">
-            <DataTable
-              data={paginatedMemories}
-              columns={columns}
-              getRowKey={(row) => row.id}
-              onRowClick={(row) => {
-                setSelectedMemory(row);
-                setIsEditing(false);
-                setExpiryInput(row.expiration_date ?? "");
-              }}
-              getRowClassName={(row) =>
-                selectedMemory?.id === row.id
-                  ? "bg-surface-default-tertiary"
-                  : undefined
-              }
-            />
-          </Card>
+            <Card className="border-memBorder-primary overflow-hidden">
+              <DataTable
+                data={paginatedMemories}
+                columns={columns}
+                getRowKey={(row) => row.id}
+                onRowClick={(row) => {
+                  setSelectedMemory(row);
+                  setIsEditing(false);
+                  setExpiryInput(row.expiration_date ?? "");
+                }}
+                getRowClassName={(row) =>
+                  selectedMemory?.id === row.id
+                    ? "bg-surface-default-tertiary"
+                    : undefined
+                }
+              />
+            </Card>
           )}
           {totalPages > 1 && (
             <div className="flex items-center justify-between text-sm text-onSurface-default-tertiary">
@@ -591,6 +604,13 @@ function MemoriesContent() {
                   <p className="text-sm">{selectedMemory.memory}</p>
                 )}
               </div>
+              <MemoryCategoriesEditor
+                memory={selectedMemory}
+                onSaved={(next) => {
+                  setSelectedMemory({ ...selectedMemory, categories: next });
+                  void refetch();
+                }}
+              />
               {selectedMemory.score != null && (
                 <div className="space-y-1">
                   <Label className="text-xs text-onSurface-default-tertiary">
