@@ -147,6 +147,35 @@ DELETE_ALL_BATCH_SIZE = 1000
 _IDENTITY_KEYS = ENTITY_PARAMS | {"actor_id"}
 
 
+def _retag_text_for_update(
+    llm: Any,
+    custom_categories: Any,
+    custom_category_rules: Any,
+    text: str,
+) -> Optional[List[str]]:
+    """Re-run the active category catalog over updated memory text (Platform parity).
+
+    Platform re-analyzes a memory whenever its content changes: the tags are drawn from
+    whatever catalog is active at that moment and replace the stored ones. Returns the new
+    tag list, or ``None`` when no project catalog is configured or the categorizer failed -
+    both mean "leave the stored tags untouched".
+    """
+    if not custom_categories:
+        return None
+    errors: List[BaseException] = []
+    try:
+        mapped = categorize_memories(llm, [text], custom_categories, custom_category_rules, errors)
+    except Exception as e:  # categorization must never block a write
+        logger.warning(f"Categorization failed (memory updated, tags left as-is): {e}")
+        return None
+    if errors:
+        # The classifier broke: an empty result here means "unknown", not "no match", so the
+        # stored tags are kept rather than silently wiped.
+        logger.warning(f"Categorization failed (memory updated, tags left as-is): {errors[0]}")
+        return None
+    return mapped.get(0, [])
+
+
 def _strip_identity_keys(
     metadata: Dict[str, Any],
     existing_payload: Dict[str, Any],
@@ -1962,6 +1991,13 @@ class Memory(MemoryBase):
         if expiration_date is not _UNSET:
             update_metadata = update_metadata or {}
             update_metadata["expiration_date"] = _normalize_expiration_date(expiration_date)
+        # Platform parity: new content is re-analyzed against the active catalog. An explicit
+        # ``categories`` from the caller (the REST layer's manual re-tag) always wins.
+        if text is not None and not (update_metadata or {}).get(CATEGORY_FIELD):
+            tags = _retag_text_for_update(self.llm, self.custom_categories, self.custom_category_rules, text)
+            if tags is not None:
+                update_metadata = update_metadata or {}
+                update_metadata[CATEGORY_FIELD] = tags
 
         existing_embeddings = {}
         if text is not None:
@@ -3721,6 +3757,16 @@ class AsyncMemory(MemoryBase):
         if expiration_date is not _UNSET:
             update_metadata = update_metadata or {}
             update_metadata["expiration_date"] = _normalize_expiration_date(expiration_date)
+
+        # Platform parity: new content is re-analyzed against the active catalog. An explicit
+        # ``categories`` from the caller (the REST layer's manual re-tag) always wins.
+        if text is not None and not (update_metadata or {}).get(CATEGORY_FIELD):
+            tags = await asyncio.to_thread(
+                _retag_text_for_update, self.llm, self.custom_categories, self.custom_category_rules, text
+            )
+            if tags is not None:
+                update_metadata = update_metadata or {}
+                update_metadata[CATEGORY_FIELD] = tags
 
         existing_embeddings = {}
         if text is not None:

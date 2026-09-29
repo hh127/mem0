@@ -14,7 +14,7 @@ Three layers are covered:
 
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -387,9 +387,14 @@ def quiet(monkeypatch):
     def _noop(*args, **kwargs):
         return None
 
+    async def _noop_async(*args, **kwargs):
+        return None
+
     monkeypatch.setattr(main_mod, "capture_event", _noop, raising=False)
     monkeypatch.setattr(main_mod, "extract_entities_batch", lambda texts: [[] for _ in texts], raising=False)
     monkeypatch.setattr(main_mod, "lemmatize_for_bm25", lambda text: text, raising=False)
+    monkeypatch.setattr(main_mod, "display_first_run_notice", _noop, raising=False)
+    monkeypatch.setattr(main_mod, "display_first_run_notice_async", _noop_async, raising=False)
 
 
 def _bare_memory(llm):
@@ -824,3 +829,173 @@ def test_explain_caps_the_number_of_candidates():
         ]
     )
     assert len(explain_categorization(llm, "文本", CATALOG)["candidates"]) == 3
+
+
+# --------------------------------------------------------------------------- #
+# 9. update() re-categorization (Platform re-analyzes a memory on content change)
+# --------------------------------------------------------------------------- #
+
+EXISTING_MEMORY = {
+    "data": "用户喜欢喝茶。",
+    "hash": "h1",
+    "user_id": "u1",
+    "categories": ["个人偏好"],
+    "created_at": "2025-01-01T00:00:00+00:00",
+}
+
+
+class UpdateRecordingVectorStore(RecordingVectorStore):
+    """Serves one existing memory and records the payload written back by ``update()``."""
+
+    def __init__(self, payload):
+        super().__init__()
+        self.payload = dict(payload)
+        self.updates = []
+
+    def get(self, vector_id):
+        return SimpleNamespace(id=vector_id, payload=dict(self.payload))
+
+    def update(self, **kwargs):
+        self.updates.append(kwargs)
+
+    def updated_payload(self):
+        return self.updates[-1]["payload"]
+
+
+def _memory_for_update(llm, payload=None, catalog=CATALOG, rules=RULES):
+    """A Memory carrying only what the update path touches, backed by one stored memory."""
+    mem = main_mod.Memory.__new__(main_mod.Memory)
+    mem.llm = llm
+    mem.custom_categories = catalog
+    mem.custom_category_rules = rules
+    mem.vector_store = UpdateRecordingVectorStore(payload or EXISTING_MEMORY)
+    mem.embedding_model = MagicMock()
+    mem.embedding_model.embed.return_value = [0.1, 0.2, 0.3]
+    mem.db = RecordingDB()
+    mem._entity_store = None
+    mem._remove_memory_from_entity_store = MagicMock()
+    mem._link_entities_for_memory = MagicMock()
+    return mem
+
+
+def test_update_retags_a_memory_whose_content_changed(quiet):
+    llm = DispatchingLLM(_categorization_response((0, ["工作项目"])))
+    mem = _memory_for_update(llm)
+
+    mem.update(memory_id="m1", text="用户在做造价审计项目。")
+
+    assert llm.categorization_calls == 1
+    assert mem.vector_store.updated_payload()[CATEGORY_FIELD] == ["工作项目"]
+    assert mem.vector_store.updated_payload()["data"] == "用户在做造价审计项目。"
+
+
+def test_update_clears_the_tags_when_the_new_text_matches_nothing(quiet):
+    llm = DispatchingLLM(_categorization_response())
+    mem = _memory_for_update(llm)
+
+    mem.update(memory_id="m1", text="与目录无关的文本。")
+
+    assert mem.vector_store.updated_payload()[CATEGORY_FIELD] == []
+
+
+def test_update_without_a_project_catalog_leaves_the_tags_alone(quiet):
+    llm = DispatchingLLM(_categorization_response((0, ["工作项目"])))
+    mem = _memory_for_update(llm, catalog=None)
+
+    mem.update(memory_id="m1", text="用户在做造价审计项目。")
+
+    assert llm.categorization_calls == 0
+    assert mem.vector_store.updated_payload()[CATEGORY_FIELD] == ["个人偏好"]
+
+
+def test_update_metadata_only_never_calls_the_categorizer(quiet):
+    llm = DispatchingLLM(_categorization_response((0, ["工作项目"])))
+    mem = _memory_for_update(llm)
+
+    mem.update(memory_id="m1", metadata={"source": "manual"})
+
+    assert llm.categorization_calls == 0
+    assert mem.vector_store.updated_payload()[CATEGORY_FIELD] == ["个人偏好"]
+
+
+def test_update_explicit_categories_win_over_recategorization(quiet):
+    """The REST layer's manual re-tag is passed through metadata and must not be overwritten."""
+    llm = DispatchingLLM(_categorization_response((0, ["工作项目"])))
+    mem = _memory_for_update(llm)
+
+    mem.update(memory_id="m1", text="用户在做造价审计项目。", metadata={CATEGORY_FIELD: ["手工分类"]})
+
+    assert llm.categorization_calls == 0
+    assert mem.vector_store.updated_payload()[CATEGORY_FIELD] == ["手工分类"]
+
+
+def test_update_is_fail_open_when_the_categorizer_breaks(quiet):
+    """A broken classifier must never block the update; the old tags simply stay."""
+    llm = DispatchingLLM(RuntimeError("categorizer exploded"))
+    mem = _memory_for_update(llm)
+
+    mem.update(memory_id="m1", text="用户在做造价审计项目。")
+
+    assert mem.vector_store.updated_payload()[CATEGORY_FIELD] == ["个人偏好"]
+    assert mem.vector_store.updated_payload()["data"] == "用户在做造价审计项目。"
+
+
+def test_update_uses_the_active_project_rules(quiet):
+    captured = {}
+
+    def fake_categorize(llm, texts, catalog, rules=None, errors=None):
+        captured["catalog"] = catalog
+        captured["rules"] = rules
+        return {0: ["工作项目"]}
+
+    with patch.object(main_mod, "categorize_memories", fake_categorize):
+        llm = DispatchingLLM(_categorization_response((0, ["工作项目"])))
+        mem = _memory_for_update(llm)
+        mem.update(memory_id="m1", text="用户在做造价审计项目。")
+
+    assert captured["rules"] == RULES
+    assert normalize_catalog(captured["catalog"]) == normalize_catalog(CATALOG)
+
+
+@pytest.mark.asyncio
+async def test_async_update_retags_a_memory_whose_content_changed(quiet):
+    llm = DispatchingLLM(_categorization_response((0, ["工作项目"])))
+    mem = main_mod.AsyncMemory.__new__(main_mod.AsyncMemory)
+    mem.llm = llm
+    mem.custom_categories = CATALOG
+    mem.custom_category_rules = RULES
+    mem.vector_store = UpdateRecordingVectorStore(EXISTING_MEMORY)
+    mem.embedding_model = MagicMock()
+    mem.embedding_model.embed.return_value = [0.1, 0.2, 0.3]
+    mem.db = RecordingDB()
+    mem._entity_store = None
+    mem._remove_memory_from_entity_store = AsyncMock()
+    mem._link_entities_for_memory = AsyncMock()
+
+    with patch.object(main_mod, "display_first_run_notice_async", _noop_async):
+        await mem.update(memory_id="m1", text="用户在做造价审计项目。")
+
+    assert llm.categorization_calls == 1
+    assert mem.vector_store.updated_payload()[CATEGORY_FIELD] == ["工作项目"]
+
+
+def test_categorize_memories_reports_a_swallowed_failure_through_errors():
+    """The update path needs to tell "classifier broke" apart from "nothing matched"."""
+    llm = DispatchingLLM(RuntimeError("boom"))
+    errors = []
+
+    assert categorize_memories(llm, ["文本"], CATALOG, errors=errors) == {}
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+
+
+def test_categorize_memories_leaves_errors_empty_when_nothing_matches():
+    llm = DispatchingLLM(_categorization_response())
+    errors = []
+
+    assert categorize_memories(llm, ["文本"], CATALOG, errors=errors) == {}
+    assert errors == []
+
+
+async def _noop_async(*args, **kwargs):
+    return None

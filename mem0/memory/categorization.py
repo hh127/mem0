@@ -218,6 +218,7 @@ def categorize_memories(
     texts: Sequence[str],
     catalog: Any,
     decision_rules: Optional[Sequence[str]] = None,
+    errors: Optional[List[BaseException]] = None,
 ) -> Dict[int, List[str]]:
     """Tag a batch of memory texts with categories from ``catalog`` in ONE LLM call.
 
@@ -226,6 +227,10 @@ def categorize_memories(
         texts: Memory texts to classify, in index order.
         catalog: Category catalog, see :func:`normalize_catalog`.
         decision_rules: Optional ordered disambiguation rules (the "分类判断规则" block).
+        errors: Optional list this function appends a swallowed exception to. The fail-open
+            contract makes a failed run indistinguishable from "nothing matched" (both return
+            an empty mapping), so callers that overwrite existing tags — the update path —
+            pass a list here to tell the two apart and keep the stored tags on failure.
 
     Returns:
         ``{index: [category, ...]}`` — only indices with at least one match appear.
@@ -243,6 +248,8 @@ def categorize_memories(
         system_prompt = build_categorization_prompt(catalog, decision_rules)
     except Exception as e:
         logger.warning(f"Categorization skipped (unusable catalog): {e}")
+        if errors is not None:
+            errors.append(e)
         return {}
 
     user_payload = {"memories": [{"index": idx, "text": text} for idx, text in enumerate(texts)]}
@@ -256,12 +263,16 @@ def categorize_memories(
         )
     except Exception as e:
         logger.warning(f"Categorization LLM call failed (memory stored uncategorized): {e}")
+        if errors is not None:
+            errors.append(e)
         return {}
 
     try:
         mapped = parse_categorization_response(response, catalog)
     except Exception as e:  # defensive: parse already swallows, keep the write path safe
         logger.warning(f"Unexpected categorization parse error: {e}")
+        if errors is not None:
+            errors.append(e)
         return {}
 
     if logger.isEnabledFor(logging.DEBUG):

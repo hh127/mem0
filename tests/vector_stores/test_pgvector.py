@@ -2406,13 +2406,36 @@ class TestBuildFilterConditions(unittest.TestCase):
         conditions, params = _build_filter_conditions({"status": {"in": ["active", "pending"]}})
         self.assertEqual(len(conditions), 1)
         self.assertIn("payload->>%s = ANY(%s)", conditions[0])
-        self.assertEqual(params, ["status", ["active", "pending"]])
+        self.assertEqual(params, ["status", "status", ["active", "pending"], "status", ["active", "pending"]])
 
     def test_nin_operator(self):
         conditions, params = _build_filter_conditions({"status": {"nin": ["deleted", "archived"]}})
         self.assertEqual(len(conditions), 1)
-        self.assertIn("NOT (payload->>%s = ANY(%s))", conditions[0])
-        self.assertEqual(params, ["status", ["deleted", "archived"]])
+        self.assertIn("NOT COALESCE(", conditions[0])
+        self.assertIn("payload->>%s = ANY(%s)", conditions[0])
+        self.assertEqual(params, ["status", "status", ["deleted", "archived"], "status", ["deleted", "archived"]])
+
+    def test_in_matches_a_list_valued_payload_field(self):
+        """`categories` is stored as a JSON array: `->>` renders the whole array as text, so the
+        condition has to test set membership element-wise (Platform's `in` semantics)."""
+        conditions, params = _build_filter_conditions({"categories": {"in": ["工作项目"]}})
+        self.assertEqual(len(conditions), 1)
+        self.assertIn("jsonb_typeof(payload->%s) = 'array'", conditions[0])
+        self.assertIn("payload->%s ?| %s::text[]", conditions[0])
+        self.assertEqual(params, ["categories", "categories", ["工作项目"], "categories", ["工作项目"]])
+
+    def test_nin_matches_rows_missing_the_field(self):
+        """A memory without the field is "not one of these values", so nin must not drop it."""
+        conditions, _ = _build_filter_conditions({"categories": {"nin": ["工作项目"]}})
+        self.assertEqual(len(conditions), 1)
+        self.assertTrue(conditions[0].startswith("NOT COALESCE("))
+        self.assertIn(", false)", conditions[0])
+
+    def test_in_inside_a_logical_operator_keeps_the_array_aware_clause(self):
+        conditions, params = _build_filter_conditions({"$or": [{"categories": {"in": ["工作项目"]}}, {"user_id": "u1"}]})
+        self.assertEqual(len(conditions), 1)
+        self.assertIn("?|", conditions[0])
+        self.assertEqual(params, ["categories", "categories", ["工作项目"], "categories", ["工作项目"], "user_id", "u1"])
 
     def test_contains_operator(self):
         conditions, params = _build_filter_conditions({"name": {"contains": "alice"}})
@@ -2441,10 +2464,11 @@ class TestBuildFilterConditions(unittest.TestCase):
         self.assertEqual(params, ["metadata_key"])
 
     def test_list_shorthand(self):
+        """{"key": [...]} is shorthand for {"in": [...]}, so it is array-aware as well."""
         conditions, params = _build_filter_conditions({"tags": ["a", "b", "c"]})
         self.assertEqual(len(conditions), 1)
-        self.assertIn("payload->>%s = ANY(%s)", conditions[0])
-        self.assertEqual(params, ["tags", ["a", "b", "c"]])
+        self.assertIn("payload->%s ?| %s::text[]", conditions[0])
+        self.assertEqual(params, ["tags", "tags", ["a", "b", "c"], "tags", ["a", "b", "c"]])
 
     def test_or_operator(self):
         conditions, params = _build_filter_conditions({
@@ -2495,7 +2519,7 @@ class TestBuildFilterConditions(unittest.TestCase):
 
     def test_in_with_numeric_values(self):
         conditions, params = _build_filter_conditions({"priority": {"in": [1, 2, 3]}})
-        self.assertEqual(params, ["priority", ["1", "2", "3"]])
+        self.assertEqual(params, ["priority", "priority", ["1", "2", "3"], "priority", ["1", "2", "3"]])
 
     def test_boolean_true_uses_json_casing(self):
         conditions, params = _build_filter_conditions({"is_active": True})
@@ -2524,4 +2548,4 @@ class TestBuildFilterConditions(unittest.TestCase):
 
     def test_in_accepts_list_value(self):
         conditions, params = _build_filter_conditions({"user_id": {"in": ["alice", "bob"]}})
-        self.assertEqual(params, ["user_id", ["alice", "bob"]])
+        self.assertEqual(params, ["user_id", "user_id", ["alice", "bob"], "user_id", ["alice", "bob"]])

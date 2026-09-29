@@ -33,6 +33,22 @@ from mem0.vector_stores.base import VectorStoreBase
 
 logger = logging.getLogger(__name__)
 
+#: ``in``/``nin`` are set-membership tests (Platform's documented
+#: ``filters={"categories": {"in": [...]}}``), not string comparisons. A list-valued
+#: payload field — ``categories`` is the canonical one — only matches when the arrays
+#: share an element, and ``payload->>key`` renders the whole array as text, so the plain
+#: ``= ANY(...)`` form silently matched nothing for those fields. Scalars keep working
+#: through the second half of the disjunction, and ``COALESCE`` makes ``nin`` true for
+#: rows that do not carry the field at all (a missing field is "not one of these values").
+_ARRAY_AWARE_IN = (
+    "((jsonb_typeof(payload->%s) = 'array' AND payload->%s ?| %s::text[])"
+    " OR payload->>%s = ANY(%s))"
+)
+_ARRAY_AWARE_NIN = (
+    "NOT COALESCE((jsonb_typeof(payload->%s) = 'array' AND payload->%s ?| %s::text[])"
+    " OR payload->>%s = ANY(%s), false)"
+)
+
 OPERATOR_SQL_MAP = {
     "eq": ("payload->>%s = %s", False),
     "ne": ("payload->>%s != %s", False),
@@ -40,8 +56,8 @@ OPERATOR_SQL_MAP = {
     "gte": ("(payload->>%s)::numeric >= %s", True),
     "lt": ("(payload->>%s)::numeric < %s", True),
     "lte": ("(payload->>%s)::numeric <= %s", True),
-    "in": ("payload->>%s = ANY(%s)", False),
-    "nin": ("NOT (payload->>%s = ANY(%s))", False),
+    "in": (_ARRAY_AWARE_IN, False),
+    "nin": (_ARRAY_AWARE_NIN, False),
     "contains": ("payload->>%s LIKE %s", False),
     "icontains": ("payload->>%s ILIKE %s", False),
 }
@@ -95,7 +111,8 @@ def _build_filter_conditions(filters):
                         )
                     str_list = [str(v) for v in op_value]
                     conditions.append(template)
-                    params.extend([key, str_list])
+                    # The array-aware template binds the key twice and the list twice.
+                    params.extend([key, key, str_list, key, str_list])
                 elif op in ("contains", "icontains"):
                     escaped = str(op_value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                     conditions.append(template + " ESCAPE '\\'")
@@ -107,8 +124,10 @@ def _build_filter_conditions(filters):
                     else:
                         params.extend([key, str(op_value)])
         elif isinstance(value, list):
-            conditions.append("payload->>%s = ANY(%s)")
-            params.extend([key, [str(v) for v in value]])
+            # Bare-list form {"key": ["a", "b"]} means the same as {"in": [...]}
+            conditions.append(_ARRAY_AWARE_IN)
+            str_list = [str(v) for v in value]
+            params.extend([key, key, str_list, key, str_list])
         else:
             conditions.append("payload->>%s = %s")
             if isinstance(value, bool):
