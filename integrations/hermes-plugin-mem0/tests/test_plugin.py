@@ -284,3 +284,49 @@ def test_initialize_tolerates_non_numeric_sync_max_chars(plugin, monkeypatch):
     provider = plugin.Mem0MemoryProvider()
     provider.initialize("test-session")
     assert provider._sync_max_chars == plugin._SYNC_MSG_MAX_CHARS
+
+
+def test_categories_ride_the_wire_and_come_back(plugin, monkeypatch):
+    """分类要发得出去、也要收得回来：filters 用 in 形式，工具输出与召回文本都带分类。"""
+    import httpx
+
+    backend = importlib.import_module(f"{plugin.__name__}._backend")
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"results": [
+            {"id": "m1", "memory": "Prefers concise replies", "score": 0.9, "categories": ["个人偏好"]},
+            {"id": "m2", "memory": "No tags here", "score": 0.5},
+        ]})
+
+    client = backend.SelfHostedBackend("test-key", "http://localhost:8888", transport=httpx.MockTransport(respond))
+    provider = plugin.Mem0MemoryProvider()
+    monkeypatch.setattr(provider, "_create_backend", lambda: client)
+    provider.initialize("test-session")
+    try:
+        result = json.loads(provider.handle_tool_call("mem0_search", {"query": "preference", "categories": ["个人偏好"]}))
+        assert json.loads(requests[-1].content)["filters"] == {
+            "user_id": provider._user_id,
+            "categories": {"in": ["个人偏好"]},
+        }
+        assert result["results"][0]["categories"] == ["个人偏好"]
+        # 无该字段的记忆显式给空列表，模型才能区分「没有分类」和「字段被丢」
+        assert result["results"][1]["categories"] == []
+
+        provider.handle_tool_call("mem0_search", {"query": "preference"})
+        assert "categories" not in json.loads(requests[-1].content)["filters"]
+
+        block = provider.prefetch("preference")
+        assert "- [个人偏好] Prefers concise replies" in block
+        assert "- No tags here" in block
+    finally:
+        provider.shutdown()
+
+
+def test_search_schema_declares_array_items(plugin):
+    schema = next(s for s in plugin.Mem0MemoryProvider().get_tool_schemas() if s["name"] == "mem0_search")
+    categories = schema["parameters"]["properties"]["categories"]
+    assert categories["type"] == "array"
+    assert categories["items"] == {"type": "string"}  # OpenAI 拒绝没有 items 的 array
+

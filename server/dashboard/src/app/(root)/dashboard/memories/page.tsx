@@ -25,6 +25,7 @@ import { CategoryTag } from "@/components/categories/category-tag";
 import { MemoryCard } from "@/components/categories/memory-card";
 import { MemoryCategoriesEditor } from "@/components/categories/memory-categories-editor";
 import { countByCategory } from "@/lib/category-utils";
+import { categoriesChanged } from "@/lib/memory-categories";
 import {
   ALL_USERS,
   selectionToUserId,
@@ -234,11 +235,33 @@ function MemoriesContent() {
       return;
     }
     setIsSaving(true);
+    const categoriesBefore = selectedMemory.categories ?? [];
     try {
       await api.put(MEMORY_ENDPOINTS.BY_ID(selectedMemory.id), { text });
       setSelectedMemory({ ...selectedMemory, memory: text });
       setIsEditing(false);
       toast({ title: "记忆已更新", variant: "success" });
+      // 改正文会触发后端按当前项目目录重打标，而 PUT 只回一句 message、不带新标签，
+      // 所以回读这条记忆刷新面板分类——否则面板会一直显示已经被改掉的旧分类。
+      try {
+        const refreshed = await api.get<Memory>(
+          MEMORY_ENDPOINTS.BY_ID(selectedMemory.id),
+        );
+        const next = refreshed.data;
+        if (next?.id) {
+          setSelectedMemory(next);
+          if (categoriesChanged(categoriesBefore, next.categories ?? [])) {
+            const names = (next.categories ?? []).join("、");
+            toast({
+              title: "分类已按新内容重新生成",
+              description: names || "新内容没有匹配到任何分类",
+              variant: "success",
+            });
+          }
+        }
+      } catch {
+        // 回读失败不影响「已保存」的结论：列表 refetch 之后同样会带出新分类
+      }
       void refetch();
     } catch (error) {
       toast({

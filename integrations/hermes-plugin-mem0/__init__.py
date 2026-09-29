@@ -101,14 +101,16 @@ def _load_config() -> dict:
     return config
 
 
-def _schema(name: str, description: str, properties: dict[str, tuple[str, str]], required: list[str]) -> dict:
-    props = {k: {"type": t, "description": d} for k, (t, d) in properties.items()}
+def _schema(name: str, description: str, properties: dict[str, tuple[object, str]], required: list[str]) -> dict:
+    # A property type may be a bare string or a full sub-schema — ``array`` needs ``items``
+    # for strict providers (OpenAI rejects an array without it).
+    props = {k: {**t, "description": d} if isinstance(t, dict) else {"type": t, "description": d} for k, (t, d) in properties.items()}
     return {"name": name, "description": description, "parameters": {"type": "object", "properties": props, "required": required}}
 
 
 TOOL_SCHEMAS = [
     _schema("mem0_search", "Search the user's memories by meaning; returns facts ranked by relevance. Use this before answering any question that may depend on what you know about the user (preferences, facts, history, people, projects, past decisions). For multi-part or multi-hop questions, call it several times — vary the wording and run follow-up searches on what earlier results reveal; one search is rarely enough.",
-            {"query": ("string", "What to search for."), "top_k": ("integer", "Max results (default: 10, max: 50)."), "rerank": ("boolean", "Rerank results for relevance (default: false, platform mode only).")}, ["query"]),
+            {"query": ("string", "What to search for."), "top_k": ("integer", "Max results (default: 10, max: 50)."), "rerank": ("boolean", "Rerank results for relevance (default: false, platform mode only)."), "categories": ({"type": "array", "items": {"type": "string"}}, "Restrict results to memories tagged with any of these categories (exact names, OR semantics). Only use names you have actually seen in earlier results — they are shown as \"[分类名]\" prefixes.")}, ["query"]),
     _schema("mem0_add", "Store a durable fact about the user, verbatim (no LLM extraction). Call this the moment the user states a lasting preference, correction, decision, or personal detail worth recalling on future turns — don't wait to be asked to remember. Skip transient chit-chat and facts you've already stored.",
             {"content": ("string", "The fact to store.")}, ["content"]),
     _schema("mem0_update", "Replace the text of an existing memory by its ID (take the ID from a mem0_search result). Use when a stored fact has changed or was wrong — correct it in place instead of adding a duplicate.",
@@ -122,6 +124,15 @@ _PROMPT_BODY = (
     "For multi-part or multi-hop questions, run several searches with different wording/angles and follow-up searches on what the first results surface; one search is rarely enough. Keep searching until you have every fact the question needs before you answer.\n"
     "Tools: mem0_search to find memories, mem0_add to store facts, mem0_update and mem0_delete to manage by ID."
 )
+
+
+def _recall_line(result: dict) -> str:
+    """One recalled memory as a bullet body, prefixed with its categories when it has any."""
+    memory = result.get("memory", "")
+    tags = result.get("categories") or []
+    if isinstance(tags, (list, tuple)) and tags:
+        return f"[{'、'.join(str(t) for t in tags)}] {memory}"
+    return memory
 
 
 class Mem0MemoryProvider(MemoryProvider):
@@ -245,10 +256,15 @@ class Mem0MemoryProvider(MemoryProvider):
             atexit.register(self.shutdown)
             self._atexit_registered = True
 
-    def _search(self, query: str, top_k: int = 10, rerank: bool = False, backend=None) -> list:
+    def _search(self, query: str, top_k: int = 10, rerank: bool = False, backend=None, categories=None) -> list:
         # Scoped to user_id only — by design — so recall surfaces memories from any gateway/agent under this
         # principal; writes attach agent_id and metadata.channel so narrower views remain possible at query time.
-        return (backend or self._backend).search(query, filters={"user_id": self._user_id}, top_k=top_k, rerank=rerank)
+        filters: dict[str, Any] = {"user_id": self._user_id}
+        if categories:
+            # Platform's documented array-membership form. The self-hosted fork's pgvector store
+            # gained array-aware in/nin, so it works there too (a plain string compare matched nothing).
+            filters["categories"] = {"in": [str(c) for c in categories]}
+        return (backend or self._backend).search(query, filters=filters, top_k=top_k, rerank=rerank)
 
     def _add(self, messages: list, infer: bool):
         metadata = {"channel": self._channel} if self._channel else {}
@@ -278,7 +294,7 @@ class Mem0MemoryProvider(MemoryProvider):
 
         def _run():
             results = self._try(lambda: self._search(query, rerank=self._rerank_default, backend=backend), logger.debug, "Mem0 prefetch failed: %s")
-            lines = [r.get("memory", "") for r in (results or []) if r.get("memory")]
+            lines = [_recall_line(r) for r in (results or []) if r.get("memory")]
             body = "## Mem0 Memory\n" + "\n".join(f"- {line}" for line in lines) if lines else ""
             with self._prefetch_lock:
                 if self._prefetch_query == query:
@@ -336,10 +352,21 @@ class Mem0MemoryProvider(MemoryProvider):
         top_k = max(1, min(int(args.get("top_k", 10)), 50))
         rerank_raw = args.get("rerank", self._rerank_default)
         rerank = rerank_raw.lower() not in ("false", "0", "no") if isinstance(rerank_raw, str) else bool(rerank_raw)
-        results = self._search(args["query"], top_k, rerank)
+        raw_categories = args.get("categories")
+        categories = [str(c) for c in raw_categories] if isinstance(raw_categories, (list, tuple)) and raw_categories else None
+        results = self._search(args["query"], top_k, rerank, categories=categories)
         if not results:
             return json.dumps({"result": "No relevant memories found."})
-        items = [{"id": r.get("id"), "memory": r.get("memory", ""), "score": r.get("score", 0)} for r in results]
+        items = [
+            {
+                "id": r.get("id"),
+                "memory": r.get("memory", ""),
+                "score": r.get("score", 0),
+                # Always present so the model can tell "no categories" from "field dropped".
+                "categories": [str(c) for c in (r.get("categories") or [])],
+            }
+            for r in results
+        ]
         return json.dumps({"results": items, "count": len(items)})
 
     def _tool_add(self, args: dict) -> str:
