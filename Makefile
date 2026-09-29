@@ -1,4 +1,4 @@
-.PHONY: format sort lint
+.PHONY: format sort lint test test-full test-py-3.10 test-py-3.11 test-py-3.12
 
 # Variables
 ISORT_OPTIONS = --profile black
@@ -41,6 +41,10 @@ clean:
 
 test:
 	hatch run test
+
+# 全量回归（tests/ 全树）；见 scripts/run_full_tests.sh 顶部说明，含遥测/pgvector 相关坑
+test-full:
+	bash scripts/run_full_tests.sh
 
 test-py-3.10:
 	hatch run dev_py_3_10:test
