@@ -1,259 +1,122 @@
-<p align="center">
-  <a href="https://github.com/mem0ai/mem0">
-    <img src="docs/images/banner-sm.png" width="800px" alt="Mem0 - The Memory Layer for Personalized AI">
-  </a>
-</p>
-<p align="center" style="display: flex; justify-content: center; gap: 20px; align-items: center;">
-  <a href="https://trendshift.io/repositories/11194" target="blank">
-    <img src="https://trendshift.io/api/badge/repositories/11194" alt="mem0ai%2Fmem0 | Trendshift" width="250" height="55"/>
-  </a>
-</p>
+# Mem0 · 自托管分支（hh127 fork）
 
-<p align="center">
-  <a href="https://mem0.ai">Learn more</a>
-  ·
-  <a href="https://mem0.dev/DiG">Join Discord</a>
-  ·
-  <a href="https://mem0.dev/demo">Demo</a>
-</p>
+面向自托管部署的 [Mem0](https://mem0.ai) 分支：自带中文分类体系、搜索期衰减、第三方重排、
+中文 Dashboard，以及 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 记忆插件。
 
-<p align="center">
-  <a href="https://mem0.dev/DiG">
-    <img src="https://img.shields.io/badge/Discord-%235865F2.svg?&logo=discord&logoColor=white" alt="Mem0 Discord">
-  </a>
-  <a href="https://pepy.tech/project/mem0ai">
-    <img src="https://img.shields.io/pypi/dm/mem0ai" alt="Mem0 PyPI - Downloads">
-  </a>
-  <a href="https://github.com/mem0ai/mem0">
-    <img src="https://img.shields.io/github/commit-activity/m/mem0ai/mem0?style=flat-square" alt="GitHub commit activity">
-  </a>
-  <a href="https://pypi.org/project/mem0ai" target="blank">
-    <img src="https://img.shields.io/pypi/v/mem0ai?color=%2334D058&label=pypi%20package" alt="Package version">
-  </a>
-  <a href="https://www.npmjs.com/package/mem0ai" target="blank">
-    <img src="https://img.shields.io/npm/v/mem0ai" alt="Npm package">
-  </a>
-  <a href="https://www.ycombinator.com/companies/mem0">
-    <img src="https://img.shields.io/badge/Y%20Combinator-S24-orange?style=flat-square" alt="Y Combinator S24">
-  </a>
-</p>
+> 基于上游 [mem0ai/mem0](https://github.com/mem0ai/mem0)（Apache-2.0）持续同步（见
+> [与上游同步](#与上游同步)）。本分支只走自托管路线：不引导注册官方云、默认关闭遥测、
+> 界面与内置分类以中文为先。
 
-<p align="center">
-  <a href="https://mem0.ai/research"><strong>📄 Benchmarking Mem0's token-efficient memory algorithm →</strong></a>
-</p>
+## 相对上游改了什么
 
-## New Memory Algorithm (April 2026)
+| 方向 | 本分支 |
+| --- | --- |
+| **分类** | 18 个中文分类 + 判定规则（`server/categories.json`，单一事实来源）；服务端写入时自动打标，改正文触发重打标；检索支持 `categories` 数组过滤（pgvector 数组感知，对齐商业版语义） |
+| **衰减** | 搜索期衰减（native search-time decay），到期日可见、可配；Dashboard 里可调 |
+| **重排** | 通用第三方云 rerank provider；Dashboard 搜索带「使用重排」开关，可配重排模型与 top_k |
+| **LLM** | 新增 opencode provider（自动注入中转要求的请求头）；配置页支持 Base URL / temperature / max_tokens；模型连通性测试 |
+| **用量** | 记忆系统三模型（抽取/嵌入/重排）token 用量采集与统计页 |
+| **Dashboard** | 中文界面；记忆地图（分类分布 + 共现连线按强度配色）；分类浏览 / 管理 / 测试；记忆语义搜索、详情直接编辑、按用户下拉筛选 |
+| **遥测** | 默认关闭；去掉官方云导流入口 |
+| **镜像** | 镜像内置 in-repo mem0 包，支持第三方 LLM/嵌入端点 |
+| **Hermes** | 独立记忆插件 `integrations/hermes-plugin-mem0/`（见下） |
 
-| Benchmark | Old | New  | Tokens  | Latency p50  |
-| --- | --- | --- | --- | --- |
-| **LoCoMo** | 71.4 | **92.5** | 7.0K  | 0.88s  |
-| **LongMemEval** | 67.8 | **94.4** | 6.8K  | 1.09s  |
-| **BEAM (1M)** | — | **64.1** | 6.7K  | 1.00s  |
-| **BEAM (10M)** | — | **48.6** | 6.9K  | 1.05s  |
+## 快速开始
 
-All benchmarks run on the same production-representative model stack. Single-pass retrieval (one call, no agentic loops) at a top_200 retrieval budget. Scores reflect Mem0's managed platform, which includes proprietary optimizations not available in the open-source SDK; open-source users should expect directionally similar gains but not identical numbers.
+### 1. 自托管栈（server + dashboard + postgres）
 
-**What changed:**
-- **Single-pass ADD-only extraction** -- one LLM call, no UPDATE/DELETE. Memories accumulate; nothing is overwritten.
-- **Agent-generated facts are first-class** -- when an agent confirms an action, that information is now stored with equal weight.
-- **Entity linking** -- entities are extracted, embedded, and linked across memories for retrieval boosting.
-- **Multi-signal retrieval** -- semantic, BM25 keyword, and entity matching scored in parallel and fused.
-- **Temporal Reasoning** -- time-aware retrieval that ranks the right dated instance for queries about current state, past events, and upcoming plans.
-
-See the [migration guide](https://docs.mem0.ai/migration/oss-v2-to-v3) for upgrade instructions. The [evaluation framework](https://github.com/mem0ai/memory-benchmarks) is open-sourced so anyone can reproduce the numbers.
-
-## Research Highlights
-- **92.5 on LoCoMo** -- +21 points over the previous algorithm
-- **94.4 on LongMemEval** -- +27 points, with 98.2 on assistant memory recall
-- **64.1 on BEAM (1M)** -- production-scale memory evaluation at 1M tokens
-- [Read the full paper](https://mem0.ai/research)
-
-# Introduction
-
-[Mem0](https://mem0.ai) ("mem-zero") enhances AI assistants and agents with an intelligent memory layer, enabling personalized AI interactions. It remembers user preferences, adapts to individual needs, and continuously learns over time—ideal for customer support chatbots, AI assistants, and autonomous systems.
-
-### Key Features & Use Cases
-
-**Core Capabilities:**
-- **Multi-Level Memory**: Seamlessly retains User, Session, and Agent state with adaptive personalization
-- **Developer-Friendly**: Intuitive API, cross-platform SDKs, and a fully managed service option
-
-**Applications:**
-- **AI Assistants**: Consistent, context-rich conversations
-- **Customer Support**: Recall past tickets and user history for tailored help
-- **Healthcare**: Track patient preferences and history for personalized care
-- **Productivity & Gaming**: Adaptive workflows and environments based on user behavior
-
-## 🚀 Quickstart Guide <a name="quickstart"></a>
-
-### Sign up as an agent
-
-AI agents can mint a working Mem0 API key in under five seconds — no email, no dashboard, no OTP. Four commands end-to-end:
+一条命令起栈、建管理员、签发首个 API Key：
 
 ```bash
-# 1. Install
-npm install -g @mem0/cli      # or: pip install mem0-cli
-
-# 2. Sign up as an agent (replace `claude-code` with your name)
-mem0 init --agent --agent-caller claude-code
-
-# 3. Add a memory
-mem0 add "I am using mem0"
-
-# 4. Search
-mem0 search "am I using mem0"
+cd server
+cp .env.example .env      # 至少填 POSTGRES_PASSWORD 和 OPENAI_API_KEY
+make bootstrap
 ```
 
-The human owner can claim the account later with `mem0 init --email <their-email>` — same key, memories preserved. Full guide: [Sign up as an agent](https://docs.mem0.ai/platform/agent-signup).
-
-| | Library | Self-Hosted Server | Cloud Platform |
-|---|---------|-------------------|----------------|
-| **Best for** | Testing, prototyping | Teams running on their own infrastructure | Zero-ops production use |
-| **Setup** | `pip install mem0ai` | `docker compose up` | Sign up at [app.mem0.ai](https://app.mem0.ai?utm_source=oss&utm_medium=readme) |
-| **Dashboard** | -- | [Yes](https://docs.mem0.ai/open-source/setup) | Yes |
-| **Auth & API Keys** | -- | Yes | Yes |
-| **Advanced Features** | -- | Teasers | All included |
-
-Just testing? Use the library. Building for a team? Self-hosted. Want zero ops? Cloud.
-
-### Library (pip / npm)
+或者手动起栈，再用浏览器向导完成初始化：
 
 ```bash
-pip install mem0ai
+cd server && docker compose up -d     # dashboard: http://localhost:3000
 ```
 
-For enhanced hybrid search with BM25 keyword matching and entity extraction, install with NLP support:
+`deploy/docker-compose.yaml` 是同一套栈的另一种编排（直接用 `ghcr.io/hh127/mem0-server:main`
+镜像，`mem0-server` / `mem0-dashboard` / `mem0-postgres` 三件套，数据卷持久化），
+适合直接跑在 NAS / 服务器上。
+
+### 2. 接上 Hermes Agent
 
 ```bash
-pip install mem0ai[nlp]
-python -m spacy download en_core_web_sm
+hermes plugins install hh127/mem0/integrations/hermes-plugin-mem0
+hermes plugins enable mem0
+hermes memory setup mem0        # 选 Self-hosted server，填 URL 与 API Key
+hermes memory status            # Plugin: installed / available
 ```
 
-Install sdk via npm:
+插件提供 4 个 agent 工具（`mem0_search` / `mem0_add` / `mem0_update` / `mem0_delete`），
+按分类过滤，每轮**自动召回**与**自动捕获**（自动捕获的记忆按分级 TTL 过期，默认 30 天，
+`MEM0_AUTO_TTL_DAYS` 可调或关闭；`mem0_add` 显式写入的长期记忆永不过期）。
+
+容器化部署（含幂等部署脚本、端到端自测、重建后自动恢复）见
+[`integrations/hermes-plugin-mem0/`](./integrations/hermes-plugin-mem0/README.md)
+与 [`deploy/README.md`](./integrations/hermes-plugin-mem0/deploy/README.md)。
+
+### 3. 直接在代码里用（上游 SDK）
 
 ```bash
-npm install mem0ai
+pip install mem0ai          # Python
+npm install mem0ai          # Node
 ```
 
-### Self-Hosted Server
+服务端 OpenAPI 文档在 `http://<host>:<映射端口>/docs`（`server/` 编排把 8000 映射到 8888，
+`deploy/` 编排映射到 6688；dashboard 两者都是 3000）。SDK 用法、LLM/嵌入配置等仍以
+上游文档 [docs.mem0.ai](https://docs.mem0.ai) 为准。
 
-> **Note:** Self-hosted auth is on by default. Upgrading from a pre-auth build? Set `ADMIN_API_KEY`, register an admin through the wizard, or `AUTH_DISABLED=true` for local dev only. See [upgrade notes](https://docs.mem0.ai/open-source/setup#upgrade-notes).
+## 分类体系
 
-```bash
-# Recommended: one command — start the stack, create an admin, issue the first API key.
-cd server && make bootstrap
+本分支的核心差异。18 个分类定义在 `server/categories.json`（含每个分类的边界说明与
+`decision_rules` 判定规则），服务端据此在写入时给记忆打标：
 
-# Manual: start the stack and finish setup via the browser wizard.
-cd server && docker compose up -d    # http://localhost:3000
+```
+个人信息   个人偏好   行为习惯   工作信息   工作项目   专业知识   技术能力   开发项目
+设备环境   软件与服务 网络与基础设施 长期目标 短期任务 重要决策 关系与人物 重要事件
+知识收藏   AI助手设置
 ```
 
-See the [self-hosted docs](https://docs.mem0.ai/open-source/overview) for configuration.
+约定：分类名原样返回 —— 不翻译、不改写、不新增、不输出同义词或大小写变体。
 
-### Cloud Platform
+* **写入打标**：由服务端自动完成，记忆 payload 自带 `categories`。
+* **检索过滤**：`filters={"categories": {"in": ["工作项目"]}}`（数组成员语义，需要支持数组
+  感知过滤的 pgvector 实现，本分支已内置）。
+* **修改重打标**：`PUT /memories/{id}` 改正文会重新触发分类判定。
+* **自定义**：改 `server/categories.json` 后重启 `mem0-server` 即可；Dashboard 提供分类浏览 /
+  管理 / 测试页。
 
-1. Sign up on [Mem0 Platform](https://app.mem0.ai?utm_source=oss&utm_medium=readme)
-2. Embed the memory layer via SDK or API keys
-3. Using hosted Qdrant vectors? See the [Platform migration guide](https://docs.mem0.ai/migration/oss-to-platform) to import them into Mem0 Platform.
+## 仓库结构
 
-### CLI
-
-Manage memories from your terminal:
-
-```bash
-npm install -g @mem0/cli   # or: pip install mem0-cli
-
-mem0 init
-mem0 add "Prefers dark mode and vim keybindings" --user-id alice
-mem0 search "What does Alice prefer?" --user-id alice
+```
+mem0/              核心 SDK（本分支含分类、衰减、重排等改动）
+server/           自托管 FastAPI 服务 + Dashboard（categories.json 在此）
+integrations/     各编辑器/Agent 集成，含 hermes-plugin-mem0
+deploy/           自托管栈的 compose 编排（hh127 镜像）
+docs/             文档站源码（英文）
+skills/           Agent skills（上游）
+cli/ evaluation/ tests/ scripts/   上游
 ```
 
-See the [CLI documentation](https://docs.mem0.ai/platform/cli) for the full command reference.
+`make test` 跑单元测试；`make test-full` 跑全量回归入口（遥测感知，避免 posthog 撑爆内存）。
 
-### Agent Skills
+## 与上游同步
 
-Teach your AI coding assistant (Claude Code, Codex, Cursor, Windsurf, OpenCode, OpenClaw, and any tool that supports the skills standard) how to build with Mem0. Two categories:
+* `origin` → `github.com/hh127/mem0`（本分支），`upstream` → `github.com/mem0ai/mem0`。
+* 上游改动按需 `git fetch upstream && git merge upstream/main`；本分支提交集中在 `server/`、
+  `server/dashboard/`、`integrations/hermes-plugin-mem0/`，冲突面小。
+* 本分支的定制（分类、衰减、重排、Dashboard）都落在源码里，不依赖补丁脚本 ——
+  升级镜像后行为不变。
 
-**Reference skills — always on** (SDK knowledge loaded into the assistant's context):
+## 许可与出处
 
-```bash
-npx skills add https://github.com/mem0ai/mem0 --skill mem0
-npx skills add https://github.com/mem0ai/mem0 --skill mem0-cli
-npx skills add https://github.com/mem0ai/mem0 --skill mem0-vercel-ai-sdk
-```
-
-**Pipeline skills — run on demand** (execute an end-to-end workflow in an existing repo):
-
-```bash
-npx skills add https://github.com/mem0ai/mem0 --skill mem0-integrate
-npx skills add https://github.com/mem0ai/mem0 --skill mem0-test-integration
-npx skills add https://github.com/mem0ai/mem0 --skill mem0-oss-to-platform
-```
-
-Use `/mem0-integrate` to wire Mem0 into an existing repo via a test-first pipeline, then `/mem0-test-integration` to verify. Use `/mem0-oss-to-platform` to migrate an existing project from Mem0 OSS to the hosted Platform SDK. See the [skills catalog](./skills/) or [Vibecoding with Mem0](https://docs.mem0.ai/vibecoding) for the full picture.
-
-### Basic Usage
-
-Mem0 requires an LLM to function, with `gpt-5-mini` from OpenAI as the default. However, it supports a variety of LLMs; for details, refer to our [Supported LLMs documentation](https://docs.mem0.ai/components/llms/overview).
-
-Mem0 uses `text-embedding-3-small` from OpenAI as the default embedding model. For best results with hybrid search (semantic + keyword + entity boosting), we recommend using at least [Qwen 600M](https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct) or a comparable embedding model. See [Supported Embeddings](https://docs.mem0.ai/components/embedders/overview) for configuration details.
-
-First step is to instantiate the memory:
-
-```python
-from openai import OpenAI
-from mem0 import Memory
-
-openai_client = OpenAI()
-memory = Memory()
-
-def chat_with_memories(message: str, user_id: str = "default_user") -> str:
-    # Retrieve relevant memories
-    relevant_memories = memory.search(query=message, filters={"user_id": user_id}, top_k=3)
-    memories_str = "\n".join(f"- {entry['memory']}" for entry in relevant_memories["results"])
-
-    # Generate Assistant response
-    system_prompt = f"You are a helpful AI. Answer the question based on query and memories.\nUser Memories:\n{memories_str}"
-    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": message}]
-    response = openai_client.chat.completions.create(model="gpt-5-mini", messages=messages)
-    assistant_response = response.choices[0].message.content
-
-    # Create new memories from the conversation
-    messages.append({"role": "assistant", "content": assistant_response})
-    memory.add(messages, user_id=user_id)
-
-    return assistant_response
-
-def main():
-    print("Chat with AI (type 'exit' to quit)")
-    while True:
-        user_input = input("You: ").strip()
-        if user_input.lower() == 'exit':
-            print("Goodbye!")
-            break
-        print(f"AI: {chat_with_memories(user_input)}")
-
-if __name__ == "__main__":
-    main()
-```
-
-For detailed integration steps, see the [Quickstart](https://docs.mem0.ai/quickstart) and [API Reference](https://docs.mem0.ai/api-reference).
-
-## 🔗 Integrations & Demos
-
-- **ChatGPT with Memory**: Personalized chat powered by Mem0 ([Live Demo](https://mem0.dev/demo))
-- **Browser Extension**: Store memories across ChatGPT, Perplexity, and Claude ([Chrome Extension](https://chromewebstore.google.com/detail/onihkkbipkfeijkadecaafbgagkhglop?utm_source=item-share-cb))
-- **Langgraph Support**: Build a customer bot with Langgraph + Mem0 ([Guide](https://docs.mem0.ai/integrations/langgraph))
-- **CrewAI Integration**: Tailor CrewAI outputs with Mem0 ([Example](https://docs.mem0.ai/integrations/crewai))
-
-## 📚 Documentation & Support
-
-- Full docs: https://docs.mem0.ai
-- Community: [Discord](https://mem0.dev/DiG) · [X (formerly Twitter)](https://x.com/mem0ai)
-- Contact: founders@mem0.ai
-
-## Citation
-
-We now have a paper you can cite:
+Apache 2.0 —— 见 [LICENSE](./LICENSE)。上游项目 [mem0ai/mem0](https://github.com/mem0ai/mem0)，
+论文引用：
 
 ```bibtex
 @article{mem0,
@@ -263,7 +126,3 @@ We now have a paper you can cite:
   year={2025}
 }
 ```
-
-## ⚖️ License
-
-Apache 2.0 — see the [LICENSE](https://github.com/mem0ai/mem0/blob/main/LICENSE) file for details.
