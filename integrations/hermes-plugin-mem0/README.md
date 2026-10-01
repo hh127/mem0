@@ -1,131 +1,172 @@
-# Mem0 for Hermes Agent
+# Mem0 for Hermes Agent（Hermes 记忆插件）
 
-Persistent memory for [Hermes Agent](https://github.com/NousResearch/hermes-agent), powered by [Mem0](https://mem0.ai).
+[中文](./README.md) · [English](./README.en.md)
 
-This standalone plugin recalls relevant memories before a response and extracts facts from conversations afterward. It works alongside Hermes' file-based memory and supports Mem0 Cloud, a self-hosted Mem0 server, or the in-process OSS SDK.
+为 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 提供持久记忆，后端是 [Mem0](https://mem0.ai)。
 
-## Features
+> 来自 `hh127/mem0` 分支。插件同时兼容上游 `mem0ai/mem0`；依赖分支侧支持的能力（分类过滤）
+> 已在文中标注。
 
-- **Automatic recall and capture** across conversations.
-- **Four agent tools** to search, add, update, and delete memories.
-- **Three backend modes** with interactive setup through `hermes memory setup`.
-- **User-scoped memories** with agent and channel metadata on writes.
+这是一个独立插件：回答前召回相关记忆，对话结束后抽取事实。它与 Hermes 自带的文件记忆并存，
+支持 Mem0 Cloud、自托管 Mem0 服务端，或进程内 OSS SDK 三种后端。
 
-## Setup
+## 特性
 
-### 1. Install
+- 跨会话**自动召回**（回答前）与**自动捕获**（回答后抽取事实）。
+- **4 个 agent 工具**：搜索、添加、更新、删除记忆。
+- **三种后端模式**，通过 `hermes memory setup` 交互式配置。
+- 记忆按**用户维度隔离**，写入时附带 agent 与 channel 元数据。
 
-Requires [Hermes Agent](https://github.com/NousResearch/hermes-agent) with memory-provider plugin support and Python 3.11 or later. After this directory is merged to Mem0's main branch:
+## 安装与配置
+
+### 1. 安装
+
+需要支持 memory-provider 插件的 Hermes Agent，以及 Python 3.11 或更高版本：
 
 ```bash
-hermes plugins install mem0ai/mem0/integrations/hermes-plugin-mem0
+hermes plugins install hh127/mem0/integrations/hermes-plugin-mem0
 hermes plugins enable mem0
 ```
 
-Hermes installers with plugin dependency support install `mem0ai>=2.0.10,<3` and `httpx>=0.27,<1` from this directory's `pyproject.toml`. On older hosts such as Hermes v0.21.3, install those requirements into the **Hermes Python environment** explicitly. The OSS setup wizard installs additional provider packages as needed.
+支持插件依赖的 Hermes 安装器会依据本目录的 `pyproject.toml` 自动装 `mem0ai>=2.0.10,<3` 和
+`httpx>=0.27,<1`。在较老的宿主（如 Hermes v0.21.3）上，需要手动把这两个依赖装进
+**Hermes 的 Python 环境**。OSS 向导会按需补装其他 provider 包。
 
-> Hermes versions that still bundle Mem0 prefer the bundled provider. Use a Hermes release that has completed the standalone-provider migration; installing this plugin alone does not replace the bundled implementation. See [Existing users and migration](#existing-users-and-migration).
+> 仍内置 Mem0 的 Hermes 版本会优先用内置 provider。请使用已完成「独立 provider 迁移」的 Hermes
+> 版本；只装本插件并不会替换内置实现。迁移细节见[老用户与迁移](#老用户与迁移)。
 
-### 2. Configure
+### 2. 配置
 
 ```bash
 hermes memory setup mem0
 ```
 
-Run this in an interactive terminal and choose a backend:
+在交互式终端里运行并选择后端：
 
-| Mode | What you need |
+| 模式 | 需要什么 |
 |------|----------------|
-| **Platform** (default) | A Mem0 API key from [app.mem0.ai](https://app.mem0.ai/dashboard/api-keys) |
-| **Self-hosted server** | A running [Mem0 server](../../server), its URL, and its API key unless authentication is disabled |
-| **OSS** | An LLM, embedder, and vector store; no Mem0 API key needed |
+| **Platform**（默认） | [app.mem0.ai](https://app.mem0.ai/dashboard/api-keys) 的 Mem0 API Key |
+| **Self-hosted server** | 一个运行中的 [Mem0 服务端](../../server)、它的 URL，以及 API Key（若未关闭认证） |
+| **OSS** | 一个 LLM、一个嵌入模型、一个向量库；不需要 Mem0 API Key |
 
-For a self-hosted server, choose **Self-hosted server** and enter its URL and API key. Requests use `X-API-Key` and the server's `/search` and `/memories` routes. Setting `host` selects this backend unless `mode` is `oss`.
+自托管模式选 **Self-hosted server**，填 URL 和 API Key。请求走 `X-API-Key`，使用服务端的
+`/search` 与 `/memories` 路由。设置了 `host` 就会选这个后端，除非 `mode` 是 `oss`。
 
-For the in-process SDK, choose **Open Source**. The wizard offers OpenAI or Ollama and local Qdrant or PGVector. Use manual configuration for custom OpenAI-compatible endpoints, deployment names, or a Qdrant server. OSS does not use Mem0 Cloud; data still goes to whichever model services you configure. Run setup again to switch modes. When switching to Platform, remove any stale `MEM0_HOST` setting from the environment and profile `.env`.
+进程内 SDK 模式选 **Open Source**。向导提供 OpenAI 或 Ollama，以及本地 Qdrant 或 PGVector。
+自定义 OpenAI 兼容端点、部署名或 Qdrant 服务端需要手工配置。OSS 不走 Mem0 Cloud，
+但数据仍会发往你配置的模型服务。再次运行 setup 可切换模式；切回 Platform 时记得清掉环境与
+profile `.env` 里残留的 `MEM0_HOST`。
 
-Desktop sessions in the same process and profile share local Qdrant storage when their OSS settings match. Operations are serialized, and storage closes after the last session releases it. Conflicting settings are rejected without changing existing memories; close the active sessions before changing models or credentials. Use a Qdrant server or the self-hosted Mem0 HTTP API when separate processes (for example, CLI and Desktop together) need the same store.
+同 profile 下同进程的 Desktop 会话，在 OSS 设置一致时共享本地 Qdrant 存储：操作串行化，
+最后一个会话释放后关闭存储。设置冲突会被拒绝且不改动现有记忆；改模型或凭据前先关掉活动会话。
+需要多进程（比如 CLI 与 Desktop 同时）共用同一份存储时，请改用 Qdrant 服务端或自托管 HTTP API。
 
-Hermes hosts whose `hermes memory setup --help` lists only a provider argument reject options such as `--mode`, `--host`, and `--oss-llm` before the plugin runs. Use the interactive command above, or the [manual profile configuration](https://docs.mem0.ai/integrations/hermes) for unattended setup. Redirected input cannot select the mode picker; it falls back to Platform.
+若宿主的 `hermes memory setup --help` 只接受一个 provider 参数，说明它会在插件运行前就拒绝
+`--mode` / `--host` / `--oss-llm` 之类的选项。请用上面的交互式命令，或参考
+[手工配置 profile 文件](https://docs.mem0.ai/integrations/hermes) 做无人值守安装。
+重定向输入无法操作系统选择菜单，会回落到 Platform。
 
-### 3. Verify
+### 3. 验证
 
 ```bash
 hermes memory status
 ```
 
-Start a fresh Hermes conversation and ask it to remember a fact, then search for that fact in a later session using the same user identity.
+然后开一个新的 Hermes 会话，让它记住一件事，再在之后的会话里用同一用户身份搜出来。
 
-## Tools
+## 工具
 
-| Tool | Description | Parameters |
+| 工具 | 说明 | 参数 |
 |------|-------------|------------|
-| `mem0_search` | Search memories by meaning | `query`, optional `top_k` (default 10, max 50) and `rerank` (Platform only) |
-| `mem0_add` | Store text verbatim, without fact extraction | `content` |
-| `mem0_update` | Update a memory's text | `memory_id`, `text` |
-| `mem0_delete` | Delete a memory | `memory_id` |
+| `mem0_search` | 按语义搜索记忆 | `query`；可选 `top_k`（默认 10，最大 50）、`rerank`、`categories`（数组，OR 语义） |
+| `mem0_add` | 原样存入文本，不做事实抽取 | `content` |
+| `mem0_update` | 修改某条记忆的正文 | `memory_id`、`text` |
+| `mem0_delete` | 删除某条记忆 | `memory_id` |
 
-## Configuration
+`categories` 过滤要求后端的向量库支持数组成员判定 —— 本分支的 pgvector 过滤支持；上游标准
+自托管服务端对任何 filters 形式都会返回 0 命中。召回时分类名以 `[分类名]` 前缀显示，
+方便模型复用准确名称。
 
-Settings live in `$HERMES_HOME/mem0.json`; the default Hermes home is `~/.hermes`. Setup normally stores API keys in that profile's `.env`. Distinct OpenAI LLM/embedder keys and database credentials are stored in the OSS configuration. Setup writes both files atomically with owner-only permissions.
+## 配置项
 
-| Key | Default | Description |
+设置放在 `$HERMES_HOME/mem0.json`，Hermes 默认 home 是 `~/.hermes`。setup 通常把 API Key 写进
+该 profile 的 `.env`。OSS 模式的 OpenAI LLM/嵌入 Key 与数据库凭据写在 OSS 配置里。
+setup 会原子地写这两个文件，权限仅限属主。
+
+| 键 | 默认值 | 说明 |
 |-----|---------|-------------|
-| `mode` | `platform` | `platform` for Cloud/server routing, or `oss` for the in-process SDK |
-| `host` | unset | Self-hosted server URL; ignored in OSS mode |
-| `user_id` | gateway user ID, then `hermes-user` | Set a stable ID to share memories across gateways |
-| `agent_id` | `hermes` | Agent identifier attached to writes |
-| `rerank` | `false` | Platform reranking for automatic recall and tool searches that omit `rerank` |
-| `sync_max_chars` | `450` | Maximum characters per user/assistant message sent for automatic extraction |
-| `oss` | `{}` | OSS LLM, embedder, and vector-store configuration written by setup |
+| `mode` | `platform` | `platform` 走 Cloud/服务端路由；`oss` 走进程内 SDK |
+| `host` | 未设置 | 自托管服务端 URL；OSS 模式下忽略 |
+| `user_id` | 网关用户 ID，其次 `hermes-user` | 设成固定值可在多个网关间共享记忆 |
+| `agent_id` | `hermes` | 写入时附带的 agent 标识 |
+| `rerank` | `false` | 自动召回与未显式指定 `rerank` 的工具搜索是否重排（本分支对自托管 `/search` 也会转发） |
+| `sync_max_chars` | `450` | 送去自动抽取的每条用户/助手消息的最大字符数 |
+| `oss` | `{}` | setup 写入的 OSS LLM、嵌入与向量库配置 |
 
-`MEM0_MODE`, `MEM0_HOST`, `MEM0_USER_ID`, and `MEM0_AGENT_ID` provide environment defaults; non-empty file settings override them. `MEM0_API_KEY` supplies the Cloud or server key when `api_key` is not set in the file.
+`MEM0_AUTO_TTL_DAYS`（本分支新增，默认 `30`）设置自动捕获记忆的保留期；`0` 或 `off` 关闭过期。
+通过 `mem0_add` 写入的事实永不过期。
 
-An explicit `user_id` other than `hermes-user` takes precedence over a gateway's native user ID. Searches use that user identity across sessions; writes attach `agent_id` and `metadata.channel`.
+`MEM0_MODE` / `MEM0_HOST` / `MEM0_USER_ID` / `MEM0_AGENT_ID` 提供环境变量默认值；文件里的非空设置
+优先级更高。文件里没写 `api_key` 时，`MEM0_API_KEY` 作为 Cloud 或服务端密钥。
 
-## Automatic recall and capture
+显式设置的 `user_id`（非 `hermes-user`）优先于网关自带的用户 ID。检索以该用户身份跨会话进行；
+写入附带 `agent_id` 与 `metadata.channel`。
 
-Recall waits up to three seconds for memories relevant to the current message. If results are late, the model can still call `mem0_search`.
+## 自动召回与自动捕获
 
-After a turn, a background worker sends the user message and assistant response for extraction. Each message is truncated to **450 characters by default in every mode**, preferring a sentence boundary. Increase `sync_max_chars` to suit your model's context limit. Explicit `mem0_add` calls store their supplied text verbatim.
+召回最多等 3 秒，取与当前消息相关的记忆；结果来晚了，模型仍可自行调用 `mem0_search`。
 
-Capture is best effort: if the previous sync remains busy after a five-second wait, the new turn is skipped. There is no durable queue. Five consecutive backend failures pause calls for two minutes before retrying.
+一轮结束后，后台 worker 把用户消息与助手回复送去抽取。**所有模式下每条消息默认截断到 450 字符**，
+优先在句边界切。按你模型的上下文上限调大 `sync_max_chars`。显式 `mem0_add` 调用则原样存文本。
 
-Graceful shutdown waits for active recall and capture workers before closing the backend, including at Python process exit. Backend network timeouts still apply: self-hosted HTTP capture has a 120-second read timeout and a 30-second connection timeout; other self-hosted HTTP operations use 30 seconds. Forced termination, including Hermes' 30-second exit watchdog, can still interrupt pending writes.
+捕获是尽力而为：上一轮同步在等待 5 秒后仍忙，新一轮就跳过，没有持久队列。后端连续失败 5 次会
+暂停 2 分钟再重试。
 
-## Existing users and migration
+优雅退出会等活动的召回与捕获 worker 结束再关闭后端，包括 Python 进程退出时。后端网络超时仍然
+生效：自托管 HTTP 捕获读超时 120 秒、连接超时 30 秒，其他自托管 HTTP 操作为 30 秒。
+强制终止（包括 Hermes 的 30 秒退出看门狗）仍可能打断未完成的写入。
 
-Keep `memory.provider: mem0`, your existing `mem0.json`, `MEM0_*` settings, user identity, and OSS storage paths. Moving the plugin does not require moving memories or rerunning setup.
+## 老用户与迁移
 
-Automatic migration also requires coordination in Hermes:
+保留 `memory.provider: mem0`、已有的 `mem0.json`、`MEM0_*` 设置、用户身份和 OSS 存储路径即可。
+迁移插件位置不需要搬记忆，也不用重跑 setup。
 
-1. A Hermes build containing [migration support from PR #114569](https://github.com/NousResearch/hermes-agent/pull/114569).
-2. An approved catalog entry named `mem0`, pointing to `https://github.com/mem0ai/mem0`, with `subdir: integrations/hermes-plugin-mem0` and a reviewed full commit SHA.
-3. Removal of Hermes' bundled Mem0 provider, which otherwise takes precedence.
+自动迁移还需要 Hermes 侧配合：
 
-With those in place, Hermes can install a missing configured provider during `hermes update` or at agent startup. Startup installation respects `security.allow_lazy_installs`; disabled or offline installation requires manual action. Merging this directory alone does not register the catalog entry or complete rollout.
+1. 包含 [PR #114569 迁移支持](https://github.com/NousResearch/hermes-agent/pull/114569) 的 Hermes 构建。
+2. 一条名为 `mem0` 的已审核 catalog 条目，指向 `https://github.com/mem0ai/mem0`，
+   `subdir: integrations/hermes-plugin-mem0`，并带已审核的完整 commit SHA。
+3. 移除 Hermes 内置的 Mem0 provider —— 否则它优先级更高。
 
-The plugin supports CLI setup/status. It does not include a Desktop configuration panel or provider-specific CLI commands.
+以上就位后，Hermes 可在 `hermes update` 或 agent 启动时自动安装缺失的已配置 provider。
+启动安装受 `security.allow_lazy_installs` 控制；禁用或离线时需手工安装。
+只合并本目录并不会注册 catalog 条目、也不算完成 rollout。
 
-## Troubleshooting
+插件支持 CLI 的 setup/status，不提供 Desktop 配置面板或 provider 专属 CLI 子命令。
 
-- **Mem0 unavailable:** run `hermes memory status`. Check the API key and backend connectivity; after five consecutive failures the circuit breaker waits two minutes.
-- **Memories missing:** confirm the same user identity across sessions and check `sync_max_chars`. Automatic extraction may omit facts; use `mem0_add` to store exact text.
-- **OSS connection refused:** check the configured model/vector service, or filesystem permissions for local Qdrant.
-- **Embedding dimension mismatch:** initialization fails without deleting existing data. Restore the previous embedding model/dimensions, or use a new collection and migrate data explicitly.
+## 排障
 
-## Development
+- **Mem0 不可用**：跑 `hermes memory status`。检查 API Key 与后端连通性；连续失败 5 次后断路器会等 2 分钟。
+- **记忆缺失**：确认跨会话用的是同一用户身份，并检查 `sync_max_chars`。自动抽取可能漏掉事实；
+  需要精确文本就用 `mem0_add`。
+- **OSS 连接被拒**：检查配置的模型/向量服务，或本地 Qdrant 的文件权限。
+- **嵌入维度不匹配**：初始化会失败且不删既有数据。恢复原来的嵌入模型/维度，或换一个新 collection
+  并显式迁移数据。
 
-From the Mem0 repository root, with `ruff` and `isort` installed:
+## 开发
+
+在 Mem0 仓库根目录，需已安装 `ruff` 和 `isort`：
 
 ```bash
 ruff check integrations/hermes-plugin-mem0
 isort --check-only --profile black integrations/hermes-plugin-mem0
 ```
 
-Validate changes in an isolated Hermes profile using live CLI and Desktop sessions. Check memory
-add/search/update/delete, automatic capture and recall, overlapping Desktop sessions, and persistence after restart.
+在隔离的 Hermes profile 中用真实 CLI 与 Desktop 会话验证改动：记忆的增删改查、自动捕获与召回、
+Desktop 会话重叠、以及重启后的持久性。
 
-## License
+## 许可
 
-[Apache-2.0](LICENSE) for Mem0 contributions. Includes code from [Nous Research's standalone Mem0 provider](https://github.com/NousResearch/hermes-plugin-mem0/tree/3fc36950b2b7c19cdd81c6de99f10d2cbed850af) under MIT; its original license and copyright notice are preserved in the third-party section of [LICENSE](LICENSE).
+Mem0 贡献部分为 [Apache-2.0](LICENSE)。包含来自
+[Nous Research 独立 Mem0 provider](https://github.com/NousResearch/hermes-plugin-mem0/tree/3fc36950b2b7c19cdd81c6de99f10d2cbed850af)
+的 MIT 代码；其原始许可与版权声明保留在 [LICENSE](LICENSE) 的第三方章节。

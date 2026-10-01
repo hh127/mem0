@@ -1,5 +1,7 @@
 # Mem0 · 自托管分支（hh127 fork）
 
+[中文](./README.md) · [English](./README.en.md)
+
 面向自托管部署的 [Mem0](https://mem0.ai) 分支：自带中文分类体系、搜索期衰减、第三方重排、
 中文 Dashboard，以及 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 记忆插件。
 
