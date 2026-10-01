@@ -81,6 +81,34 @@ docker cp /tmp/mem0-plugin-backup-<ts>/prev/. hermes:/opt/hermes/plugins/memory/
 docker exec hermes /command/s6-svc -t /run/service/gateway-default
 ```
 
+## Self-test
+
+After deploying, exercise every plugin surface against the live backend:
+
+```bash
+docker cp selftest_plugin.py hermes:/tmp/
+docker exec hermes /opt/hermes/.venv/bin/python3 /tmp/selftest_plugin.py
+docker exec hermes rm -f /tmp/selftest_plugin.py
+```
+
+It checks config resolution, backend selection, the four tools, automatic recall
+(`prefetch`), automatic capture (`sync_turn`), argument validation and the
+ownership guard. All writes go to an isolated user (`__plugin_selftest__`,
+override with `--user`) that is deleted at the end — real memories are never
+touched. `sync_turn` is asynchronous and only cleaned up after capture is
+observed, so the run takes a couple of minutes. Exit code 0 = all green.
+
+`mem0_search(categories=[...])` filtering needs a backend whose vector store
+understands array membership (this fork's pgvector array-aware filter). An older
+self-hosted server returns zero hits for *every* filter shape — when that check
+fails, update the mem0-server image too, not just this plugin. A quick probe:
+
+```bash
+docker exec mem0-server sh -c \
+  "grep -c categories /usr/local/lib/python3.12/site-packages/mem0/vector_stores/pgvector.py"
+# 0 -> too old; >0 -> array-aware filtering present
+```
+
 ## Persistence
 
 The replacement is lost on container recreate. To make it durable, bind-mount a
