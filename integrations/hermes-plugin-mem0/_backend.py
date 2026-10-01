@@ -14,8 +14,17 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _add_kwargs(user_id: str, agent_id: str, infer: bool, metadata: dict | None) -> dict[str, Any]:
-    return {"user_id": user_id, "agent_id": agent_id, "infer": infer, **({"metadata": metadata} if metadata else {})}
+def _add_kwargs(user_id: str, agent_id: str, infer: bool, metadata: dict | None,
+                expiration_date: str | None = None) -> dict[str, Any]:
+    # ``expiration_date`` (ISO date) is set for auto-captured turns — tiered retention —
+    # and omitted for deliberate mem0_add writes, which never expire.
+    return {
+        "user_id": user_id,
+        "agent_id": agent_id,
+        "infer": infer,
+        **({"metadata": metadata} if metadata else {}),
+        **({"expiration_date": expiration_date} if expiration_date else {}),
+    }
 
 
 def _unwrap_results(response: Any) -> list:
@@ -30,7 +39,8 @@ class Mem0Backend(ABC):
     @abstractmethod
     def search(self, query: str, *, filters: dict, top_k: int = 10, rerank: bool = False) -> list[dict]: ...
     @abstractmethod
-    def add(self, messages: list, *, user_id: str, agent_id: str, infer: bool = False, metadata: dict | None = None) -> dict: ...
+    def add(self, messages: list, *, user_id: str, agent_id: str, infer: bool = False, metadata: dict | None = None,
+            expiration_date: str | None = None) -> dict: ...
     @abstractmethod
     def get(self, memory_id: str) -> dict | None: ...
     @abstractmethod
@@ -60,8 +70,9 @@ class PlatformBackend(Mem0Backend):
     def search(self, query: str, *, filters: dict, top_k: int = 10, rerank: bool = False) -> list[dict]:
         return _unwrap_results(self._client.search(query, filters=filters, top_k=top_k, rerank=rerank))
 
-    def add(self, messages: list, *, user_id: str, agent_id: str, infer: bool = False, metadata: dict | None = None) -> dict:
-        return self._client.add(messages, **_add_kwargs(user_id, agent_id, infer, metadata))
+    def add(self, messages: list, *, user_id: str, agent_id: str, infer: bool = False, metadata: dict | None = None,
+            expiration_date: str | None = None) -> dict:
+        return self._client.add(messages, **_add_kwargs(user_id, agent_id, infer, metadata, expiration_date))
 
     def get(self, memory_id: str) -> dict | None:
         return self._client.get(memory_id)
@@ -91,12 +102,17 @@ class SelfHostedBackend(Mem0Backend):
         return resp.json() if resp.content else {}
 
     def search(self, query: str, *, filters: dict, top_k: int = 10, rerank: bool = False) -> list[dict]:
-        # rerank is platform-only; the self-hosted /search ignores it. user_id belongs in filters (top-level is deprecated).
-        return _unwrap_results(self._json("POST", "/search", json={"query": query, "top_k": top_k, **({"filters": filters} if filters else {})}))
+        # user_id belongs in filters (top-level is deprecated). This fork's self-hosted /search
+        # honours ``rerank`` (the fork added it server-side) — forward it when requested.
+        body: dict[str, Any] = {"query": query, "top_k": top_k, **({"filters": filters} if filters else {})}
+        if rerank:
+            body["rerank"] = True
+        return _unwrap_results(self._json("POST", "/search", json=body))
 
-    def add(self, messages: list, *, user_id: str, agent_id: str, infer: bool = False, metadata: dict | None = None) -> dict:
+    def add(self, messages: list, *, user_id: str, agent_id: str, infer: bool = False, metadata: dict | None = None,
+            expiration_date: str | None = None) -> dict:
         # Server-side extraction takes longer than a search or verbatim write.
-        return self._json("POST", "/memories", json={"messages": messages, **_add_kwargs(user_id, agent_id, infer, metadata)},
+        return self._json("POST", "/memories", json={"messages": messages, **_add_kwargs(user_id, agent_id, infer, metadata, expiration_date)},
                           timeout=self._capture_timeout if infer else self._client.timeout)
 
     def get(self, memory_id: str) -> dict | None:
@@ -287,8 +303,9 @@ class OSSBackend(Mem0Backend):
     def search(self, query: str, *, filters: dict, top_k: int = 10, rerank: bool = False) -> list[dict]:
         return _unwrap_results(self._call("search", query, filters=filters, top_k=top_k))
 
-    def add(self, messages: list, *, user_id: str, agent_id: str, infer: bool = False, metadata: dict | None = None) -> dict:
-        return self._call("add", messages, **_add_kwargs(user_id, agent_id, infer, metadata))
+    def add(self, messages: list, *, user_id: str, agent_id: str, infer: bool = False, metadata: dict | None = None,
+            expiration_date: str | None = None) -> dict:
+        return self._call("add", messages, **_add_kwargs(user_id, agent_id, infer, metadata, expiration_date))
 
     def get(self, memory_id: str) -> dict | None:
         return self._call("get", memory_id)

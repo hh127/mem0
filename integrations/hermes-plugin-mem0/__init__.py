@@ -267,8 +267,26 @@ class Mem0MemoryProvider(MemoryProvider):
         return (backend or self._backend).search(query, filters=filters, top_k=top_k, rerank=rerank)
 
     def _add(self, messages: list, infer: bool):
+        import os
+        from datetime import datetime, timedelta, timezone
         metadata = {"channel": self._channel} if self._channel else {}
-        return self._backend.add(messages, user_id=self._user_id, agent_id=self._agent_id, infer=infer, metadata=metadata)
+        # Tiered retention: auto-captured turns (infer=True) expire after MEM0_AUTO_TTL_DAYS
+        # (default 30; 0/off/false/no/none disables); facts stored deliberately via mem0_add
+        # never expire. Keeps the auto-capture stream from growing without bound.
+        expiry = None
+        if infer:
+            raw = os.environ.get("MEM0_AUTO_TTL_DAYS", "30")
+            if isinstance(raw, str) and raw.strip().lower() in ("off", "false", "no", "none"):
+                days = 0
+            else:
+                try:
+                    days = int(raw or 0)
+                except ValueError:
+                    days = 30
+            if days > 0:
+                expiry = (datetime.now(timezone.utc) + timedelta(days=days)).date().isoformat()
+        return self._backend.add(messages, user_id=self._user_id, agent_id=self._agent_id,
+                                 infer=infer, metadata=metadata, expiration_date=expiry)
 
     def system_prompt_block(self) -> str:
         # Mirror _create_backend precedence (oss > host > platform). Rerank is a Mem0 Platform feature only.

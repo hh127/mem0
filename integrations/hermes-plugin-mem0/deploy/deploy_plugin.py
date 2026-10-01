@@ -202,7 +202,11 @@ def main() -> int:
         remote.run(f"docker cp {args.container}:{args.dest} {backup}/prev", sudo=True)
         print(f"[*] backup: {backup}/prev")
 
-        remote.run(f"docker cp {staging}/. {args.container}:{args.dest}/", sudo=True)
+        # Copy the plugin files one by one: `docker cp {staging}/.` would also drop the
+        # <name>.b64 upload shards into the plugin directory (they can never be imported,
+        # but they litter the bundled provider dir and confuse later diffs).
+        for name in PLUGIN_FILES:
+            remote.run(f"docker cp {staging}/{name} {args.container}:{args.dest}/{name}", sudo=True)
         print("[*] replaced plugin files")
 
         after = container_md5(remote, args.container, args.dest, PLUGIN_FILES)

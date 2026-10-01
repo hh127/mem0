@@ -111,24 +111,48 @@ docker exec mem0-server sh -c \
 
 ## Persistence
 
-The replacement is lost on container recreate. To make it durable, bind-mount a
-host directory over the bundled path. Keep a copy of this plugin on the host
-(e.g. next to the compose file) and add to the Hermes service:
+The replacement lives in the image layer, so it is lost on container recreate
+(`docker compose up --force-recreate`, image upgrade). Two ways to survive that.
+
+**Bind-mount (not used here).** Mount a host directory over the bundled path:
 
 ```yaml
 services:
   hermes:
     volumes:
-      - /volume1/docker/hermes/mem0-plugin:/opt/hermes/plugins/memory/mem0:ro
+      - /volume1/docker/hermes/data/hermes-config/mem0-plugin:/opt/hermes/plugins/memory/mem0:ro
 ```
 
-Back up the compose file first and show the diff before applying — a wrong
-volume entry can stop the container from starting. With the mount in place,
-updating the plugin is just "copy files into the host directory + restart the
-container".
+**Data-volume copy restored by the entrypoint (what this deployment uses).** Keep
+the sources on the data volume and copy them over the bundled dir on every boot
+from `/opt/data/hermes-config/scripts/fix-permissions.sh` (runs as root before
+the gateway starts, so it survives image updates without touching compose):
 
-If you only want the change for the current container lifetime, skip the mount;
-it will revert on the next image update.
+```sh
+MEM0_PLUGIN_SRC=/opt/data/hermes-config/mem0-plugin
+MEM0_PLUGIN_DST=/opt/hermes/plugins/memory/mem0
+if [ -d "$MEM0_PLUGIN_SRC" ] && [ -f "$MEM0_PLUGIN_SRC/__init__.py" ]; then
+    cp -f "$MEM0_PLUGIN_SRC"/*.py "$MEM0_PLUGIN_SRC"/*.yaml "$MEM0_PLUGIN_DST"/ 2>/dev/null \
+        && echo "fix-permissions: mem0 plugin restored from $MEM0_PLUGIN_SRC"
+fi
+```
+
+Host side: `/volume1/docker/hermes/data/hermes-config/mem0-plugin/` (uid 10000,
+mode 644). Updating the plugin = copy the new sources there + restart the
+container; `deploy_plugin.py` refreshes the *running* container only, so update
+the data-volume copy too (or the next boot reverts it).
+
+**In-container patch blocks are retired.** Older `fix-permissions.sh` blocks
+`sed`/python-patched the plugin for this fork (self-hosted `host=`, rerank
+forwarding, tiered-retention TTL). Those customisations now live in the plugin
+sources, so every block is a no-op (each checks for its own marker first). They
+are kept only as a safety net for an image that still ships the old plugin.
+
+The lesson from getting here: a half-applied patch is worse than none. An anchor
+that matched `__init__.py` but not `_backend.py` left `_add(infer=True)` calling
+`add(..., expiration_date=...)` on a backend without the parameter — automatic
+capture raised `TypeError` on every turn. Never let patch anchors and the plugin
+sources drift; fold the change into the sources and let the patch go inert.
 
 ## Pitfalls
 
