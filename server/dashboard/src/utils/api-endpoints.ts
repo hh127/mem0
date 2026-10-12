@@ -17,6 +17,7 @@ export const MEMORY_ENDPOINTS = {
   CONFIGURE_PROVIDERS: "/configure/providers",
   CONFIGURE_TEST: "/configure/test",
   DECAY: "/decay",
+  DEFAULT_EXPIRY: "/expiry-default",
   RESET: "/reset",
   GENERATE_INSTRUCTIONS: "/generate-instructions",
 } as const;

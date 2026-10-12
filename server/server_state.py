@@ -132,6 +132,43 @@ def restore_decay_setting() -> None:
     os.environ["MEM0_DECAY"] = "true" if raw.strip().lower() in _TRUTHY else "false"
 
 
+# --- Default memory expiry ----------------------------------------------------
+# Applied by the REST layer (main.add_memory) when a create call omits
+# `expiration_date`. Unlike the decay toggle, the mem0 library never reads this
+# value, so a module-level cache plus the settings row is enough — no os.environ
+# hop and no Memory rebuild. Persisted under one key so the choice survives restarts.
+
+DEFAULT_EXPIRY_SETTING_KEY = "default_expiry_days"
+_default_expiry_days: int | None = None
+
+
+def get_default_expiry_days() -> int | None:
+    """Days after creation at which a new memory expires; ``None`` means never."""
+    return _default_expiry_days
+
+
+def set_default_expiry_days(days: int | None) -> int | None:
+    """Persist the default. A missing / non-positive value is stored as "never"."""
+    global _default_expiry_days
+    normalized = days if isinstance(days, int) and days > 0 else None
+    _default_expiry_days = normalized
+    _save_setting(DEFAULT_EXPIRY_SETTING_KEY, "" if normalized is None else str(normalized))
+    return normalized
+
+
+def restore_default_expiry_setting() -> None:
+    """Re-apply the persisted default at startup; an unset row leaves it as never."""
+    global _default_expiry_days
+    raw = _load_setting(DEFAULT_EXPIRY_SETTING_KEY)
+    if raw is None:
+        return
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return
+    _default_expiry_days = value if value > 0 else None
+
+
 def _merge_config(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
     merged = deepcopy(base)
 
@@ -166,6 +203,7 @@ def _without_disabled_categories(config: Dict[str, Any]) -> Dict[str, Any]:
 def initialize_state(default_config: Dict[str, Any]) -> None:
     global _current_config, _memory_instance
     restore_decay_setting()
+    restore_default_expiry_setting()
     with _state_lock:
         _current_config = deepcopy(default_config)
         overrides = _load_overrides()

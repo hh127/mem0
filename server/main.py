@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 import telemetry
@@ -39,9 +40,11 @@ from schemas import MessageResponse
 from server_state import (
     get_current_config,
     get_decay_enabled,
+    get_default_expiry_days,
     get_memory_instance,
     initialize_state,
     set_decay_enabled,
+    set_default_expiry_days,
     set_session_factory,
     update_config,
 )
@@ -518,6 +521,44 @@ def set_decay(body: DecayConfig, _auth=Depends(require_admin)):
     return {"enabled": set_decay_enabled(bool(body.enabled))}
 
 
+class DefaultExpiryConfig(BaseModel):
+    days: Optional[int] = Field(
+        None,
+        ge=1,
+        le=3650,
+        description="New memories expire this many days after creation. null/omit = never expire.",
+    )
+
+
+def _apply_default_expiry(params: Dict[str, Any]) -> None:
+    """Stamp the configured default expiry onto a create call that omitted one.
+
+    A per-call ``expiration_date`` always wins; a default of "never" (or none at
+    all) leaves the memory without an expiry date, exactly like before this feature.
+    """
+    if params.get("expiration_date"):
+        return
+    days = get_default_expiry_days()
+    if not days:
+        return
+    params["expiration_date"] = (date.today() + timedelta(days=days)).isoformat()
+
+
+@app.get("/expiry-default", summary="Get the default memory expiry")
+def get_expiry_default(_auth=Depends(verify_auth)):
+    """The default time-to-live applied to new memories, in days (null = never)."""
+    return {"days": get_default_expiry_days()}
+
+
+@app.post("/expiry-default", summary="Set the default memory expiry")
+def set_expiry_default(body: DefaultExpiryConfig, _auth=Depends(require_admin)):
+    """Stored in the settings table and applied to every later create call.
+
+    Pass ``days: null`` (or 0/omitted) to clear the default so new memories never expire.
+    """
+    return {"days": set_default_expiry_days(body.days)}
+
+
 class CategoryCatalog(BaseModel):
     custom_categories: Optional[List[Dict[str, Any]]] = Field(
         None,
@@ -782,6 +823,7 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
         raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
 
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
+    _apply_default_expiry(params)
     if params.get("custom_categories"):
         # A per-call catalog obeys the same disabled-flag rule as the project one.
         params["custom_categories"] = _enabled_entries(params["custom_categories"])

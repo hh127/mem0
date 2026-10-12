@@ -120,6 +120,8 @@ export default function ConfigurationPage() {
     useState<Record<TestTarget, TestState>>(EMPTY_TEST_STATE);
   const [decayEnabled, setDecayEnabled] = useState(false);
   const [isDecaySaving, setIsDecaySaving] = useState(false);
+  const [defaultExpiryDays, setDefaultExpiryDays] = useState("");
+  const [isExpirySaving, setIsExpirySaving] = useState(false);
 
   const { data: config, isLoading: isPrefilling } = useApiQuery(
     async () => {
@@ -151,6 +153,23 @@ export default function ConfigurationPage() {
   useEffect(() => {
     if (decay) setDecayEnabled(Boolean(decay.enabled));
   }, [decay]);
+
+  // 默认记忆到期：独立于 /configure 保存，后端写入后立即对之后的新记忆生效
+  const { data: defaultExpiry } = useApiQuery<{ days: number | null }>(
+    async () => {
+      const res = await api.get<{ days: number | null }>(
+        MEMORY_ENDPOINTS.DEFAULT_EXPIRY,
+      );
+      return res.data;
+    },
+    { errorToast: "默认到期设置加载失败" },
+  );
+
+  useEffect(() => {
+    if (defaultExpiry) {
+      setDefaultExpiryDays(defaultExpiry.days ? String(defaultExpiry.days) : "");
+    }
+  }, [defaultExpiry]);
 
   useEffect(() => {
     if (!config) return;
@@ -316,6 +335,42 @@ export default function ConfigurationPage() {
       });
     } finally {
       setIsDecaySaving(false);
+    }
+  };
+
+  // 保存默认到期：传 null 表示「永不过期」，传正数表示「新建记忆 N 天后到期」
+  const saveDefaultExpiry = async () => {
+    const trimmed = defaultExpiryDays.trim();
+    const parsed = trimmed ? Number(trimmed) : null;
+    if (parsed !== null && (!Number.isInteger(parsed) || parsed < 1)) {
+      toast({
+        title: "天数要是大于 0 的整数",
+        variant: "destructive",
+      });
+      return;
+    }
+    setIsExpirySaving(true);
+    try {
+      const res = await api.post<{ days: number | null }>(
+        MEMORY_ENDPOINTS.DEFAULT_EXPIRY,
+        { days: parsed },
+      );
+      const saved = res.data.days ?? null;
+      setDefaultExpiryDays(saved ? String(saved) : "");
+      toast({
+        title: saved
+          ? `新记忆将在 ${saved} 天后到期`
+          : "已设为永不过期",
+        variant: "success",
+      });
+    } catch (error) {
+      toast({
+        title: "默认到期设置保存失败",
+        description: getErrorMessage(error),
+        variant: "destructive",
+      });
+    } finally {
+      setIsExpirySaving(false);
     }
   };
 
@@ -666,6 +721,76 @@ export default function ConfigurationPage() {
           </div>
           <p className="text-xs text-onSurface-default-tertiary">
             改这里立即生效，不用重启容器（后端写入进程环境，记忆库每次搜索都会读）。
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card className="border-memBorder-primary">
+        <CardHeader>
+          <CardTitle className="text-sm">默认记忆到期</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-xs text-onSurface-default-tertiary">
+            新建记忆如果没有单独指定到期日，就按这里的天数自动补一个（写入当天 +
+            N 天）。调用方显式传的到期日优先级更高；留空或点「永不过期」= 不设到期日。
+            到期后记忆会从搜索和列表中隐藏（数据仍在库里，清掉日期即恢复）。
+          </p>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="space-y-1">
+              <Label className="text-xs">天数</Label>
+              <Input
+                type="number"
+                min={1}
+                value={defaultExpiryDays}
+                onChange={(e) => setDefaultExpiryDays(e.target.value)}
+                placeholder="留空 = 永不过期"
+                className="h-9 w-36 text-sm"
+                disabled={!isAdmin}
+              />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {[7, 30, 365].map((days) => (
+                <Button
+                  key={days}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 px-2 text-xs"
+                  disabled={!isAdmin || isExpirySaving}
+                  onClick={() => setDefaultExpiryDays(String(days))}
+                >
+                  {days === 365 ? "1 年" : `${days} 天`}
+                </Button>
+              ))}
+            </div>
+            {isAdmin && (
+              <Button
+                size="sm"
+                onClick={() => void saveDefaultExpiry()}
+                disabled={isExpirySaving}
+              >
+                {isExpirySaving ? "保存中…" : "保存"}
+              </Button>
+            )}
+            {isAdmin && (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={isExpirySaving || !defaultExpiryDays}
+                onClick={() => {
+                  setDefaultExpiryDays("");
+                  void saveDefaultExpiry();
+                }}
+              >
+                永不过期
+              </Button>
+            )}
+          </div>
+          <p className="text-xs text-onSurface-default-tertiary">
+            当前：
+            {defaultExpiryDays
+              ? `新建记忆 ${defaultExpiryDays} 天后到期`
+              : "永不过期"}
           </p>
         </CardContent>
       </Card>
