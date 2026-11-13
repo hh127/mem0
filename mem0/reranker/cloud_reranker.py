@@ -76,6 +76,20 @@ class CloudReranker(BaseReranker):
                 return str(doc[key])
         return str(doc)
 
+    @staticmethod
+    def _with_fallback_scores(documents: List[Dict[str, Any]], n: int) -> List[Dict[str, Any]]:
+        """Copy the documents and give them a neutral score (never mutate caller dicts).
+
+        The success path already works on copies; mutating the caller's list on failure
+        made the two paths behave differently for code that reuses the input.
+        """
+        out: List[Dict[str, Any]] = []
+        for doc in documents[:n]:
+            copy = doc.copy()
+            copy["rerank_score"] = 0.0
+            out.append(copy)
+        return out
+
     def rerank(self, query: str, documents: List[Dict[str, Any]], top_k: int = None) -> List[Dict[str, Any]]:
         """Rerank documents against the query using the remote rerank API.
 
@@ -91,6 +105,9 @@ class CloudReranker(BaseReranker):
             return documents
 
         n = top_k or getattr(self.config, "top_k", None) or len(documents)
+        # Never ask for more documents than we send: some providers reject top_n > len(documents)
+        # with a 400, which would silently degrade to "no reranking" through the fallback below.
+        n = max(1, min(int(n), len(documents)))
         doc_texts = [self._doc_text(doc) for doc in documents]
 
         headers = {"Content-Type": "application/json"}
@@ -129,15 +146,11 @@ class CloudReranker(BaseReranker):
 
             if not reranked_docs:
                 logger.warning("Cloud reranker returned no usable results; keeping original order")
-                for doc in documents:
-                    doc["rerank_score"] = 0.0
-                return documents[:n]
+                return self._with_fallback_scores(documents, n)
 
             return reranked_docs
 
         except Exception as e:
             # Match the built-in providers' behaviour: degrade gracefully, never break search.
             logger.warning("Cloud reranking failed (%s), using original results", e)
-            for doc in documents:
-                doc["rerank_score"] = 0.0
-            return documents[:n]
+            return self._with_fallback_scores(documents, n)
