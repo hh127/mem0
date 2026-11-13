@@ -9,6 +9,13 @@ import { Badge } from "@/components/ui/badge";
 import { DataTable } from "@/components/shared/data-table";
 import { TableSkeleton } from "@/components/shared/table-skeleton";
 import { EmptyState } from "@/components/self-hosted/empty-state";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { api } from "@/utils/api";
 import { REQUEST_ENDPOINTS } from "@/utils/api-endpoints";
 import { useApiQuery } from "@/hooks/use-api-query";
@@ -25,7 +32,9 @@ type RequestLog = {
 };
 
 const REQUEST_LOG_LIMIT = 200;
-const PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 20;
+// 每页条数可选值：默认 20，允许用户切换（底部选择器）
+const PAGE_SIZE_OPTIONS = [20, 50, 100, 200];
 
 const getStatusClassName = (statusCode: number) => {
   if (statusCode >= 500) {
@@ -83,6 +92,8 @@ const normalizeLog = (entry: ApiRequestLog): RequestLog => {
 export default function RequestsPage() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [page, setPage] = useState(0);
+  // 每页条数（可在底部分页栏切换）；切换时回到第一页
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
   const {
     data: logs = [],
@@ -112,6 +123,12 @@ export default function RequestsPage() {
           logs.reduce((sum, log) => sum + log.latencyMs, 0) / totalRequests,
         )
       : 0;
+
+  // 分页：每页条数可调；拉取条数变化导致页码越界时钳回最后一页
+  const totalPages = Math.max(1, Math.ceil(logs.length / pageSize));
+  const currentPage = Math.min(page, totalPages - 1);
+  const pageStart = currentPage * pageSize;
+  const pageEnd = pageStart + pageSize;
 
   const columns = [
     {
@@ -239,34 +256,61 @@ export default function RequestsPage() {
         <>
           <Card className="border-memBorder-primary overflow-hidden">
             <DataTable
-              data={logs.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)}
+              data={logs.slice(pageStart, pageEnd)}
               columns={columns}
               getRowKey={(row) => row.id}
             />
           </Card>
-          {logs.length > PAGE_SIZE && (
-            <div className="flex items-center justify-between text-sm text-onSurface-default-tertiary">
+          {logs.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-onSurface-default-tertiary">
               <span>
-                {page * PAGE_SIZE + 1}–
-                {Math.min((page + 1) * PAGE_SIZE, logs.length)} of {logs.length}
+                {currentPage * pageSize + 1}–
+                {Math.min((currentPage + 1) * pageSize, logs.length)} / 共{" "}
+                {logs.length} 条
               </span>
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={page === 0}
-                  onClick={() => setPage((p) => p - 1)}
-                >
-                  上一页
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={(page + 1) * PAGE_SIZE >= logs.length}
-                  onClick={() => setPage((p) => p + 1)}
-                >
-                  下一页
-                </Button>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs">每页</span>
+                  <Select
+                    value={String(pageSize)}
+                    onValueChange={(value) => {
+                      setPageSize(Number(value));
+                      setPage(0);
+                    }}
+                  >
+                    <SelectTrigger
+                      className="h-8 w-24"
+                      aria-label="每页显示条数"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PAGE_SIZE_OPTIONS.map((n) => (
+                        <SelectItem key={n} value={String(n)}>
+                          {n} 条
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage === 0}
+                    onClick={() => setPage(currentPage - 1)}
+                  >
+                    上一页
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage >= totalPages - 1}
+                    onClick={() => setPage(currentPage + 1)}
+                  >
+                    下一页
+                  </Button>
+                </div>
               </div>
             </div>
           )}
