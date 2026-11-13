@@ -49,8 +49,7 @@ const DeleteConfirmationModal = ({
 
         <div className="space-y-4">
           <p className="text-sm text-[#565553]">
-            请输入 <span className="font-bold">{itemName}</span> to
-            confirm.
+            请输入 <span className="font-bold">{itemName}</span> 以确认。
           </p>
           <Input
             type="text"
