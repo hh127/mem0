@@ -10,8 +10,12 @@ ENV PATH="/root/.local/bin:$PATH"
 COPY server/requirements.txt .
 RUN pip install -r requirements.txt
 
-# Install mem0 in editable mode using Poetry
-WORKDIR /app/packages
+# Install the in-repo mem0 package. This fork's SDK changes (categories, decay,
+# cloud_reranker, opencode) live here, not on PyPI, so installing `mem0ai` from
+# PyPI would silently ship upstream behaviour.
+# Installed under /opt on purpose: docker-compose mounts server/ over /app later,
+# which would hide /app/packages and break the editable install.
+WORKDIR /opt/mem0-src
 COPY pyproject.toml .
 COPY poetry.lock .
 COPY README.md .
