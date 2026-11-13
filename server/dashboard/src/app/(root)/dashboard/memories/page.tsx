@@ -2,7 +2,15 @@
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { LayoutGrid, List, Pencil, Search, Trash2, X } from "lucide-react";
+import {
+  LayoutGrid,
+  List,
+  Pencil,
+  Search,
+  SquareCheckBig,
+  Trash2,
+  X,
+} from "lucide-react";
 import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,6 +25,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Card } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  BatchDeleteDialog,
+  BatchSelectionBar,
+} from "@/components/memories/batch-selection-bar";
+import { BatchCategoryDialog } from "@/components/memories/batch-category-dialog";
+import { BatchExpiryDialog } from "@/components/memories/batch-expiry-dialog";
 import { DataTable } from "@/components/shared/data-table";
 import { TableSkeleton } from "@/components/shared/table-skeleton";
 import { EmptyState } from "@/components/self-hosted/empty-state";
@@ -26,6 +41,12 @@ import { MemoryCard } from "@/components/categories/memory-card";
 import { MemoryCategoriesEditor } from "@/components/categories/memory-categories-editor";
 import { countByCategory } from "@/lib/category-utils";
 import { categoriesChanged } from "@/lib/memory-categories";
+import {
+  applyCategoryOp,
+  pruneSelection,
+  runWithConcurrency,
+  type CategoryOp,
+} from "@/lib/batch-memories";
 import {
   ALL_USERS,
   selectionToUserId,
@@ -43,11 +64,18 @@ import {
 import { toast } from "@/components/ui/use-toast";
 import { getErrorMessage } from "@/lib/error-message";
 import { api } from "@/utils/api";
-import { MEMORY_ENDPOINTS, ENTITY_ENDPOINTS } from "@/utils/api-endpoints";
+import {
+  MEMORY_ENDPOINTS,
+  ENTITY_ENDPOINTS,
+  CATEGORY_ENDPOINTS,
+} from "@/utils/api-endpoints";
 import { useApiQuery } from "@/hooks/use-api-query";
 import { Entity, Memory } from "@/types/api";
+import type { CategoryCatalog } from "@/types/api";
 
-const PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 20;
+// 每页条数可选值：默认 20，允许用户切换（底部选择器）
+const PAGE_SIZE_OPTIONS = [20, 50, 100, 200];
 // Keep in sync with ALL_MEMORIES_LIMIT in server/main.py.
 const MEMORY_FETCH_LIMIT = 1000;
 
@@ -84,6 +112,19 @@ function MemoriesContent() {
   // 同上：下拉切换后立刻 refetch，state 来不及更新
   const userIdRef = useRef("");
   const [page, setPage] = useState(0);
+  // 每页条数（可在底部分页栏切换）；换页长时回到第一页
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  // 批量选择：勾选态与「选择模式」分开 —— 退出选择时清空勾选，避免下次进来误操作
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
+  const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
+  const [expiryDialogOpen, setExpiryDialogOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
   const categoryParam = searchParams?.get("category") ?? null;
 
@@ -183,11 +224,120 @@ function MemoriesContent() {
     [memories, activeCategory],
   );
 
-  const totalPages = Math.ceil(displayMemories.length / PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(displayMemories.length / pageSize));
+  // 数据变少（筛选/删除）导致当前页越界时，钳回最后一页
+  const currentPage = Math.min(page, totalPages - 1);
   const paginatedMemories = displayMemories.slice(
-    page * PAGE_SIZE,
-    (page + 1) * PAGE_SIZE,
+    currentPage * pageSize,
+    (currentPage + 1) * pageSize,
   );
+
+  // 切换每页条数：页码可能越界，统一回到第一页
+  const changePageSize = (next: number) => {
+    setPageSize(next);
+    setPage(0);
+  };
+
+  // 分类目录：批量改分类的候选列表（和单条编辑共用同一套目录）
+  const { data: categoryCatalog } = useApiQuery<CategoryCatalog>(async () => {
+    const response = await api.get(CATEGORY_ENDPOINTS.BASE);
+    return response.data as CategoryCatalog;
+  });
+
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const selectedMemories = useMemo(
+    () => memories.filter((memory) => selectedSet.has(memory.id)),
+    [memories, selectedSet],
+  );
+  const pageIds = useMemo(
+    () => paginatedMemories.map((memory) => memory.id),
+    [paginatedMemories],
+  );
+  const allPageSelected =
+    pageIds.length > 0 && pageIds.every((id) => selectedSet.has(id));
+
+  // 列表刷新后勾选的记忆可能已经不在（被删/被筛掉）—— 及时剪掉，避免对着幽灵条目操作
+  const aliveIds = useMemo(
+    () => new Set(memories.map((memory) => memory.id)),
+    [memories],
+  );
+  useEffect(() => {
+    setSelectedIds((prev) => pruneSelection(prev, aliveIds));
+  }, [aliveIds]);
+
+  const toggleSelect = (id: string) =>
+    setSelectedIds((list) =>
+      list.includes(id) ? list.filter((item) => item !== id) : [...list, id],
+    );
+
+  const toggleSelectPage = () =>
+    setSelectedIds((list) =>
+      allPageSelected
+        ? list.filter((id) => !pageIds.includes(id))
+        : Array.from(new Set([...list, ...pageIds])),
+    );
+
+  const exitSelectMode = () => {
+    setSelectMode(false);
+    setSelectedIds([]);
+  };
+
+  /**
+   * 批量操作的统一执行器：限并发跑、报告进度、失败的重新勾上让用户重试。
+   * 分类/到期日/删除都走这里，行为一致（少写三遍同样的错误处理）。
+   */
+  const runBatch = async (
+    label: string,
+    items: Memory[],
+    worker: (memory: Memory) => Promise<unknown>,
+  ) => {
+    if (items.length === 0 || batchBusy) return;
+    setBatchBusy(true);
+    setBatchProgress({ done: 0, total: items.length });
+    const result = await runWithConcurrency(items, 4, worker, (done, total) =>
+      setBatchProgress({ done, total }),
+    );
+    setBatchBusy(false);
+    setBatchProgress(null);
+    // 只保留失败项：用户可以直接再点一次重试，成功的不会重复执行
+    setSelectedIds(result.failed.map((entry) => entry.item.id));
+    if (result.failed.length === 0) {
+      toast({
+        title: `${label}完成：${result.succeeded.length} 条`,
+        variant: "success",
+      });
+    } else {
+      toast({
+        title: `${label}：成功 ${result.succeeded.length} 条，失败 ${result.failed.length} 条`,
+        description: `失败项的勾选已保留，可直接重试。首个错误：${getErrorMessage(result.failed[0].error)}`,
+        variant: "destructive",
+      });
+    }
+    void refetch();
+  };
+
+  const applyBatchCategories = (op: CategoryOp, names: string[]) => {
+    setCategoryDialogOpen(false);
+    void runBatch("批量改分类", selectedMemories, (memory) =>
+      api.put(MEMORY_ENDPOINTS.BY_ID(memory.id), {
+        categories: applyCategoryOp(memory.categories ?? [], names, op),
+      }),
+    );
+  };
+
+  const applyBatchExpiry = (value: string | null) => {
+    setExpiryDialogOpen(false);
+    void runBatch("批量设到期日", selectedMemories, (memory) =>
+      api.put(MEMORY_ENDPOINTS.BY_ID(memory.id), { expiration_date: value }),
+    );
+  };
+
+  const applyBatchDelete = () => {
+    setDeleteDialogOpen(false);
+    void runBatch("批量删除", selectedMemories, (memory) =>
+      api.delete(MEMORY_ENDPOINTS.BY_ID(memory.id)),
+    );
+  };
 
   const runSearch = () => {
     const q = searchInput.trim();
@@ -320,6 +470,28 @@ function MemoriesContent() {
   };
 
   const columns = [
+    // 选择模式下的勾选列（表头是全选本页，由 headerCheck 提供）
+    ...(selectMode
+      ? [
+          {
+            key: "id" as keyof Memory,
+            label: "",
+            width: 40,
+            cellVariant: "flush" as const,
+            headerVariant: "check" as const,
+            render: (_value: string, row: Memory) => (
+              <div className="flex items-center justify-center">
+                <Checkbox
+                  checked={selectedSet.has(row.id)}
+                  aria-label={`选择记忆 ${row.id}`}
+                  onCheckedChange={() => toggleSelect(row.id)}
+                  onClick={(event) => event.stopPropagation()}
+                />
+              </div>
+            ),
+          },
+        ]
+      : []),
     {
       key: "memory" as keyof Memory,
       label: "内容",
@@ -385,25 +557,38 @@ function MemoriesContent() {
             {uncategorizedCount > 0 ? ` · 未归类 ${uncategorizedCount} 条` : ""}
           </p>
         </div>
-        <div className="flex items-center gap-1 rounded-md border border-memBorder-primary p-0.5">
+        <div className="flex items-center gap-2">
           <Button
-            variant={view === "cards" ? "secondary" : "ghost"}
+            variant={selectMode ? "secondary" : "outline"}
             size="sm"
             className="h-7 px-2 text-xs"
-            onClick={() => setView("cards")}
+            onClick={() =>
+              selectMode ? exitSelectMode() : setSelectMode(true)
+            }
           >
-            <LayoutGrid className="size-3.5 mr-1" />
-            卡片
+            <SquareCheckBig className="size-3.5 mr-1" />
+            {selectMode ? "退出选择" : "批量选择"}
           </Button>
-          <Button
-            variant={view === "table" ? "secondary" : "ghost"}
-            size="sm"
-            className="h-7 px-2 text-xs"
-            onClick={() => setView("table")}
-          >
-            <List className="size-3.5 mr-1" />
-            表格
-          </Button>
+          <div className="flex items-center gap-1 rounded-md border border-memBorderPrimary p-0.5">
+            <Button
+              variant={view === "cards" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={() => setView("cards")}
+            >
+              <LayoutGrid className="size-3.5 mr-1" />
+              卡片
+            </Button>
+            <Button
+              variant={view === "table" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={() => setView("table")}
+            >
+              <List className="size-3.5 mr-1" />
+              表格
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -541,12 +726,19 @@ function MemoriesContent() {
                 <MemoryCard
                   key={memory.id}
                   memory={memory}
-                  onOpen={(row) => {
-                    setSelectedMemory(row);
-                    setIsEditing(false);
-                    setExpiryInput(row.expiration_date ?? "");
-                  }}
-                  onEdit={startEditing}
+                  selectable={selectMode}
+                  selected={selectedSet.has(memory.id)}
+                  onToggleSelect={(row) => toggleSelect(row.id)}
+                  onOpen={
+                    selectMode
+                      ? undefined
+                      : (row) => {
+                          setSelectedMemory(row);
+                          setIsEditing(false);
+                          setExpiryInput(row.expiration_date ?? "");
+                        }
+                  }
+                  onEdit={selectMode ? undefined : startEditing}
                 />
               ))}
             </div>
@@ -556,45 +748,102 @@ function MemoriesContent() {
                 data={paginatedMemories}
                 columns={columns}
                 getRowKey={(row) => row.id}
+                headerCheck={
+                  selectMode ? (
+                    <Checkbox
+                      checked={allPageSelected}
+                      aria-label="全选本页"
+                      onCheckedChange={toggleSelectPage}
+                    />
+                  ) : undefined
+                }
                 onRowClick={(row) => {
+                  if (selectMode) {
+                    toggleSelect(row.id);
+                    return;
+                  }
                   setSelectedMemory(row);
                   setIsEditing(false);
                   setExpiryInput(row.expiration_date ?? "");
                 }}
                 getRowClassName={(row) =>
-                  selectedMemory?.id === row.id
+                  selectMode && selectedSet.has(row.id)
                     ? "bg-surface-default-tertiary"
-                    : undefined
+                    : selectedMemory?.id === row.id
+                      ? "bg-surface-default-tertiary"
+                      : undefined
                 }
               />
             </Card>
           )}
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between text-sm text-onSurface-default-tertiary">
+          {displayMemories.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-onSurface-default-tertiary">
               <span>
-                {page * PAGE_SIZE + 1}–
-                {Math.min((page + 1) * PAGE_SIZE, displayMemories.length)} of{" "}
-                {displayMemories.length}
+                {currentPage * pageSize + 1}–
+                {Math.min((currentPage + 1) * pageSize, displayMemories.length)}{" "}
+                / 共 {displayMemories.length} 条
               </span>
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={page === 0}
-                  onClick={() => setPage((p) => p - 1)}
-                >
-                  上一页
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={page >= totalPages - 1}
-                  onClick={() => setPage((p) => p + 1)}
-                >
-                  下一页
-                </Button>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs">每页</span>
+                  <Select
+                    value={String(pageSize)}
+                    onValueChange={(value) => changePageSize(Number(value))}
+                  >
+                    <SelectTrigger
+                      className="h-8 w-24"
+                      aria-label="每页显示条数"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PAGE_SIZE_OPTIONS.map((n) => (
+                        <SelectItem key={n} value={String(n)}>
+                          {n} 条
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage === 0}
+                    onClick={() => setPage(currentPage - 1)}
+                  >
+                    上一页
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage >= totalPages - 1}
+                    onClick={() => setPage(currentPage + 1)}
+                  >
+                    下一页
+                  </Button>
+                </div>
               </div>
             </div>
+          )}
+          {selectMode && (
+            <BatchSelectionBar
+              selectedCount={selectedIds.length}
+              filteredCount={displayMemories.length}
+              pageCount={pageIds.length}
+              allPageSelected={allPageSelected}
+              busy={batchBusy}
+              progress={batchProgress}
+              onTogglePage={toggleSelectPage}
+              onSelectAllFiltered={() =>
+                setSelectedIds(displayMemories.map((memory) => memory.id))
+              }
+              onClear={() => setSelectedIds([])}
+              onEditCategories={() => setCategoryDialogOpen(true)}
+              onEditExpiry={() => setExpiryDialogOpen(true)}
+              onDelete={() => setDeleteDialogOpen(true)}
+              onExit={exitSelectMode}
+            />
           )}
         </>
       )}
@@ -772,6 +1021,31 @@ function MemoriesContent() {
         description="This memory will be permanently removed. This cannot be undone."
         itemName={memoryToDelete?.id ?? ""}
         confirmButtonText="Delete"
+      />
+
+      <BatchCategoryDialog
+        open={categoryDialogOpen}
+        selected={selectedMemories}
+        catalog={categoryCatalog?.custom_categories ?? []}
+        busy={batchBusy}
+        onOpenChange={setCategoryDialogOpen}
+        onApply={applyBatchCategories}
+      />
+
+      <BatchExpiryDialog
+        open={expiryDialogOpen}
+        count={selectedIds.length}
+        busy={batchBusy}
+        onOpenChange={setExpiryDialogOpen}
+        onApply={applyBatchExpiry}
+      />
+
+      <BatchDeleteDialog
+        open={deleteDialogOpen}
+        count={selectedIds.length}
+        busy={batchBusy}
+        onOpenChange={setDeleteDialogOpen}
+        onConfirm={applyBatchDelete}
       />
     </div>
   );
