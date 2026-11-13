@@ -2,7 +2,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from auth import require_admin, verify_auth
+from auth import require_admin
 from errors import upstream_error
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -41,7 +41,12 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
 
 
 @router.get("", response_model=list[Entity])
-def list_entities(_auth=Depends(verify_auth)):
+def list_entities(_auth=Depends(require_admin)):
+    """List every user/agent/run entity and its memory count (admin-only).
+
+    The response enumerates all tenant identifiers, so it is restricted to admins just
+    like the request logs endpoint.
+    """
     buckets: dict[tuple[EntityType, str], dict[str, Any]] = defaultdict(
         lambda: {"total_memories": 0, "created_at": None, "updated_at": None}
     )

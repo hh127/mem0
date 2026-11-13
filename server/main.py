@@ -554,7 +554,8 @@ def get_expiry_default(_auth=Depends(verify_auth)):
 def set_expiry_default(body: DefaultExpiryConfig, _auth=Depends(require_admin)):
     """Stored in the settings table and applied to every later create call.
 
-    Pass ``days: null`` (or 0/omitted) to clear the default so new memories never expire.
+    Pass ``days: null`` to clear the default so new memories never expire. ``days`` must
+    be 1-3650; ``0`` is rejected with 422 rather than treated as "never expire".
     """
     return {"days": set_default_expiry_days(body.days)}
 
@@ -1058,9 +1059,13 @@ def usage_stats(
     group_by: str = Query("day"),
     days: int = Query(30, ge=1, le=3650),
     model_type: Optional[str] = Query(None),
-    _auth=Depends(verify_auth),
+    _auth=Depends(require_admin),
 ):
-    """按天/月/用户/操作/模型聚合记忆系统的 token 消耗（LLM、嵌入、重排）。"""
+    """按天/月/用户/操作/模型聚合记忆系统的 token 消耗（LLM、嵌入、重排）。
+
+    Admin-only: the aggregate exposes user ids and org-wide usage. ``model_type`` applies
+    to rows / totals / by_model alike so the three never disagree.
+    """
     if group_by not in USAGE_GROUPINGS:
         raise HTTPException(status_code=400, detail=f"group_by must be one of {sorted(USAGE_GROUPINGS)}")
 
@@ -1084,6 +1089,12 @@ def usage_stats(
             key_expr = TokenUsage.model_type
 
         since = datetime.now(_timezone.utc) - timedelta(days=days)
+        # One shared filter: totals / by_model must use exactly the same scope as rows,
+        # otherwise filtering by model_type shows "single-model detail + all-model total".
+        conditions = [TokenUsage.created_at >= since]
+        if model_type:
+            conditions.append(TokenUsage.model_type == model_type)
+
         grouped = select(
             key_expr.label("key"),
             TokenUsage.model_type.label("model_type"),
@@ -1092,9 +1103,7 @@ def usage_stats(
             func.coalesce(func.sum(TokenUsage.total_tokens), 0).label("total_tokens"),
             func.coalesce(func.sum(TokenUsage.cached_tokens), 0).label("prompt_cached_tokens"),
             func.count().label("calls"),
-        ).where(TokenUsage.created_at >= since)
-        if model_type:
-            grouped = grouped.where(TokenUsage.model_type == model_type)
+        ).where(*conditions)
         grouped = grouped.group_by(key_expr, TokenUsage.model_type).order_by(key_expr)
         rows = [dict(row._mapping) for row in session.execute(grouped)]
 
@@ -1105,7 +1114,7 @@ def usage_stats(
                 func.coalesce(func.sum(TokenUsage.total_tokens), 0),
                 func.coalesce(func.sum(TokenUsage.cached_tokens), 0),
                 func.count(),
-            ).where(TokenUsage.created_at >= since)
+            ).where(*conditions)
         ).one()
 
         by_model = [
@@ -1128,7 +1137,7 @@ def usage_stats(
                     func.coalesce(func.sum(TokenUsage.total_tokens), 0).label("total_tokens"),
                     func.coalesce(func.sum(TokenUsage.cached_tokens), 0).label("prompt_cached_tokens"),
                 )
-                .where(TokenUsage.created_at >= since)
+                .where(*conditions)
                 .group_by(TokenUsage.model_type)
                 .order_by(func.sum(TokenUsage.total_tokens).desc())
             )
