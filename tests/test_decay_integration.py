@@ -178,3 +178,55 @@ def test_decay_runs_after_rerank(monkeypatch, quiet):
 
     # Equal rerank scores -> decay decides: fresh (1.5x) beats stale (0.3x)
     assert [r["id"] for r in out] == ["fresh", "stale"]
+
+
+def test_decay_keeps_the_reranker_order(monkeypatch, quiet):
+    """rerank_score must drive decay; otherwise decay reinstates the old vector order."""
+    monkeypatch.setenv("MEM0_DECAY", "true")
+    store = FakeVectorStore()
+    results = [
+        {"id": "stale", "memory": "old fact", "score": 0.9, "last_accessed_at": _iso(300)},
+        {"id": "fresh", "memory": "new fact", "score": 0.2, "last_accessed_at": _iso(0)},
+    ]
+    mem, _ = _build_memory(results, store)
+
+    class FakeReranker:
+        def rerank(self, query, documents, top_k=None):
+            # Reranker overrules the vector order: "stale" is the better match.
+            return [
+                {**documents[0], "rerank_score": 0.95},
+                {**documents[1], "rerank_score": 0.05},
+            ]
+
+    mem.reranker = FakeReranker()
+    out = mem.search("query", filters={"user_id": "u1"}, top_k=2, rerank=True)["results"]
+
+    # stale: 0.95 * 0.3 = 0.285 beats fresh: 0.05 * 1.5 = 0.075.
+    # Ranking by the pre-rerank score would have put "fresh" first.
+    assert [r["id"] for r in out] == ["stale", "fresh"]
+
+
+def test_reranker_receives_a_capped_candidate_pool(monkeypatch, quiet):
+    """LLM rerankers score one document per call, so the decay pool must be capped."""
+    monkeypatch.setenv("MEM0_DECAY", "true")
+    monkeypatch.setenv("MEM0_RERANK_MAX_DOCS", "3")
+    store = FakeVectorStore()
+    many = [
+        {"id": str(i), "memory": f"fact {i}", "score": 0.9 - i * 0.01, "last_accessed_at": _iso(0)}
+        for i in range(8)
+    ]
+    mem, _ = _build_memory(many, store)
+    seen = {}
+
+    class FakeReranker:
+        def rerank(self, query, documents, top_k=None):
+            seen["docs"] = len(documents)
+            seen["top_k"] = top_k
+            return documents
+
+    mem.reranker = FakeReranker()
+    mem.search("query", filters={"user_id": "u1"}, top_k=2, rerank=True)
+
+    # decay pool is 50, but the cost guard caps the reranker input at 3 (never below limit)
+    assert seen["docs"] == 3
+    assert seen["top_k"] == 3

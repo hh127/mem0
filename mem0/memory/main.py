@@ -146,6 +146,25 @@ DELETE_ALL_BATCH_SIZE = 1000
 # creation or the update path (issues #4490, #6277, #6655).
 _IDENTITY_KEYS = ENTITY_PARAMS | {"actor_id"}
 
+# Upper bound on the candidate list handed to a reranker. When decay is on, search
+# over-fetches a pool (up to 200 results); LLM-based rerankers score one document per
+# LLM call, so an uncapped pool turns a top_k=5 search into ~200 serial calls. The cap
+# never goes below the requested limit; 0 disables it (not recommended for LLM rerank).
+RERANK_MAX_DOCS_ENV = "MEM0_RERANK_MAX_DOCS"
+RERANK_MAX_DOCS_DEFAULT = 50
+
+
+def _rerank_candidates(memories: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    """Trim the candidate list sent to the reranker (cost guard)."""
+    raw = os.environ.get(RERANK_MAX_DOCS_ENV, str(RERANK_MAX_DOCS_DEFAULT))
+    try:
+        cap = int(raw)
+    except (TypeError, ValueError):
+        cap = RERANK_MAX_DOCS_DEFAULT
+    if cap <= 0 or len(memories) <= limit:
+        return memories
+    return memories[: max(limit, min(len(memories), cap))]
+
 
 def _retag_text_for_update(
     llm: Any,
@@ -1622,7 +1641,11 @@ class Memory(MemoryBase):
         # Apply reranking if enabled and reranker is available
         if rerank and self.reranker and original_memories:
             try:
-                reranked_memories = self.reranker.rerank(query, original_memories, fetch_k)
+                # Cost guard: cap the candidate pool handed to the reranker (see
+                # _rerank_candidates). Without it a decay over-fetch pool of ~200 turns
+                # an LLM reranker into ~200 serial calls for a top_k=5 search.
+                candidates = _rerank_candidates(original_memories, limit)
+                reranked_memories = self.reranker.rerank(query, candidates, len(candidates))
                 original_memories = reranked_memories
             except Exception as e:
                 logger.warning(f"Reranking failed, using original results: {e}")
@@ -3395,9 +3418,11 @@ class AsyncMemory(MemoryBase):
         # Apply reranking if enabled and reranker is available
         if rerank and self.reranker and original_memories:
             try:
+                # Cost guard: cap the pool handed to the reranker (see _rerank_candidates).
+                candidates = _rerank_candidates(original_memories, limit)
                 # Run reranking in thread pool to avoid blocking async loop
                 reranked_memories = await asyncio.to_thread(
-                    self.reranker.rerank, query, original_memories, fetch_k
+                    self.reranker.rerank, query, candidates, len(candidates)
                 )
                 original_memories = reranked_memories
             except Exception as e:
