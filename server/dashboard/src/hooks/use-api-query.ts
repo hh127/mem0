@@ -28,12 +28,20 @@ export function useApiQuery<T>(
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
+  // Request sequence guard: a slow earlier request must not overwrite fresher data
+  // (e.g. batch refetch racing a filter switch). Only the newest run may publish.
+  const seqRef = useRef(0);
+
   const run = useCallback(async () => {
+    const seq = ++seqRef.current;
     setIsLoading(true);
     setError("");
     try {
-      setData(await fetcherRef.current());
+      const next = await fetcherRef.current();
+      if (seq !== seqRef.current) return;
+      setData(next);
     } catch (err) {
+      if (seq !== seqRef.current) return;
       const message = getErrorMessage(err, errorToast || "请求失败");
       setError(message);
       if (errorToast) {
@@ -44,7 +52,7 @@ export function useApiQuery<T>(
         });
       }
     } finally {
-      setIsLoading(false);
+      if (seq === seqRef.current) setIsLoading(false);
     }
   }, [errorToast]);
 

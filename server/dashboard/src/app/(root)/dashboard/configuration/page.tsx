@@ -167,7 +167,9 @@ export default function ConfigurationPage() {
 
   useEffect(() => {
     if (defaultExpiry) {
-      setDefaultExpiryDays(defaultExpiry.days ? String(defaultExpiry.days) : "");
+      setDefaultExpiryDays(
+        defaultExpiry.days ? String(defaultExpiry.days) : "",
+      );
     }
   }, [defaultExpiry]);
 
@@ -338,9 +340,11 @@ export default function ConfigurationPage() {
     }
   };
 
-  // 保存默认到期：传 null 表示「永不过期」，传正数表示「新建记忆 N 天后到期」
-  const saveDefaultExpiry = async () => {
-    const trimmed = defaultExpiryDays.trim();
+  // 保存默认到期：value 省略时取输入框；传 "" 表示「永不过期」，传正数表示「新建记忆 N 天后到期」。
+  // 必须把值作为参数传入：setState 是异步的，在「永不过期」按钮里先 setState 再调用会让
+  // 这里读到旧闭包值，等于又把旧天数存一遍。
+  const saveDefaultExpiry = async (value: string = defaultExpiryDays) => {
+    const trimmed = value.trim();
     const parsed = trimmed ? Number(trimmed) : null;
     if (parsed !== null && (!Number.isInteger(parsed) || parsed < 1)) {
       toast({
@@ -358,9 +362,7 @@ export default function ConfigurationPage() {
       const saved = res.data.days ?? null;
       setDefaultExpiryDays(saved ? String(saved) : "");
       toast({
-        title: saved
-          ? `新记忆将在 ${saved} 天后到期`
-          : "已设为永不过期",
+        title: saved ? `新记忆将在 ${saved} 天后到期` : "已设为永不过期",
         variant: "success",
       });
     } catch (error) {
@@ -732,7 +734,8 @@ export default function ConfigurationPage() {
         <CardContent className="space-y-3">
           <p className="text-xs text-onSurface-default-tertiary">
             新建记忆如果没有单独指定到期日，就按这里的天数自动补一个（写入当天 +
-            N 天）。调用方显式传的到期日优先级更高；留空或点「永不过期」= 不设到期日。
+            N 天）。调用方显式传的到期日优先级更高；留空或点「永不过期」=
+            不设到期日。
             到期后记忆会从搜索和列表中隐藏（数据仍在库里，清掉日期即恢复）。
           </p>
           <div className="flex flex-wrap items-end gap-3">
@@ -779,7 +782,7 @@ export default function ConfigurationPage() {
                 disabled={isExpirySaving || !defaultExpiryDays}
                 onClick={() => {
                   setDefaultExpiryDays("");
-                  void saveDefaultExpiry();
+                  void saveDefaultExpiry("");
                 }}
               >
                 永不过期
