@@ -141,15 +141,19 @@ def build_categorization_prompt(catalog: Any, decision_rules: Optional[Sequence[
     return "\n\n".join(parts)
 
 
-def parse_categorization_response(response: str, catalog: Any) -> Dict[int, List[str]]:
+def parse_categorization_response(response: str, catalog: Any) -> Optional[Dict[int, List[str]]]:
     """Parse the LLM response into ``{memory_index: [category, ...]}``.
 
     Only names present in the catalog are kept (case-insensitive fallback for ASCII
-    variants); malformed responses yield an empty dict rather than raising.
+    variants). A *parseable* response that simply matches nothing yields an empty dict;
+    an unusable response (garbage, truncated JSON, explicit error object) yields
+    ``None`` so callers that overwrite stored tags can tell "unknown" from "no match".
     """
     entries = normalize_catalog(catalog)
-    if not entries or not response:
+    if not entries:
         return {}
+    if not response or not str(response).strip():
+        return None
 
     valid_names = {name for name, _ in entries}
     lower_to_original = {name.lower(): name for name in valid_names}
@@ -157,14 +161,23 @@ def parse_categorization_response(response: str, catalog: Any) -> Dict[int, List
     try:
         payload = remove_code_blocks(response)
         if not payload or not payload.strip():
-            return {}
+            return None
         try:
             parsed = json.loads(payload, strict=False)
         except json.JSONDecodeError:
             parsed = json.loads(extract_json(payload), strict=False)
     except Exception as e:
         logger.warning(f"Failed to parse categorization response: {e}. Response: {str(response)[:200]}")
-        return {}
+        return None
+
+    if (
+        isinstance(parsed, dict)
+        and "error" in parsed
+        and "results" not in parsed
+        and "categories" not in parsed
+    ):
+        logger.warning(f"Categorization response reported an error: {str(parsed.get('error'))[:200]}")
+        return None
 
     raw_results = parsed.get("results") if isinstance(parsed, dict) else None
     if raw_results is None and isinstance(parsed, dict):
@@ -174,7 +187,7 @@ def parse_categorization_response(response: str, catalog: Any) -> Dict[int, List
         raw_results = [{"index": key, "categories": value} for key, value in raw_results.items()]
     if not isinstance(raw_results, list):
         logger.warning("Categorization response has no usable results list")
-        return {}
+        return None
 
     mapped: Dict[int, List[str]] = {}
     for item in raw_results:
@@ -273,6 +286,14 @@ def categorize_memories(
         logger.warning(f"Unexpected categorization parse error: {e}")
         if errors is not None:
             errors.append(e)
+        return {}
+
+    if mapped is None:
+        # Unparseable answer: "unknown", not "no match". Record it so callers that would
+        # overwrite stored tags (the update path) keep them instead of wiping them.
+        logger.warning("Categorization response was unusable (memory stored uncategorized)")
+        if errors is not None:
+            errors.append(ValueError("categorization response could not be parsed"))
         return {}
 
     if logger.isEnabledFor(logging.DEBUG):

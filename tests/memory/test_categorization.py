@@ -197,13 +197,19 @@ def test_parse_ignores_unusable_entries_without_failing_the_batch():
     [
         "",
         None,
+        "   ",
         "not json at all",
         '{"results": "nope"}',
-        '{"results": [1, 2, 3]}',
-        '{"unexpected": true}',
+        '{"error": "model refused"}',
     ],
 )
-def test_parse_returns_empty_dict_for_garbage(response):
+def test_parse_returns_none_for_unparseable_responses(response):
+    """Unusable answers are "unknown", not "no match" (the update path relies on this)."""
+    assert parse_categorization_response(response, CATALOG) is None
+
+
+@pytest.mark.parametrize("response", ['{"results": [1, 2, 3]}', '{"unexpected": true}'])
+def test_parse_returns_empty_dict_for_parseable_responses_without_usable_entries(response):
     assert parse_categorization_response(response, CATALOG) == {}
 
 
@@ -277,6 +283,14 @@ def test_categorize_memories_returns_empty_dict_when_llm_raises():
 def test_categorize_memories_returns_empty_dict_when_llm_returns_garbage():
     llm = ScriptedLLM(["I could not decide, sorry."])
     assert categorize_memories(llm, ["文本"], CATALOG) == {}
+
+
+def test_categorize_memories_records_an_error_for_an_unparseable_response():
+    """`errors` is how the update path tells "unknown" apart from "no match"."""
+    llm = ScriptedLLM(["I could not decide, sorry."])
+    errors = []
+    assert categorize_memories(llm, ["文本"], CATALOG, errors=errors) == {}
+    assert len(errors) == 1
 
 
 def test_categorize_memories_skips_the_llm_without_a_catalog():
@@ -932,6 +946,17 @@ def test_update_explicit_categories_win_over_recategorization(quiet):
 def test_update_is_fail_open_when_the_categorizer_breaks(quiet):
     """A broken classifier must never block the update; the old tags simply stay."""
     llm = DispatchingLLM(RuntimeError("categorizer exploded"))
+    mem = _memory_for_update(llm)
+
+    mem.update(memory_id="m1", text="用户在做造价审计项目。")
+
+    assert mem.vector_store.updated_payload()[CATEGORY_FIELD] == ["个人偏好"]
+    assert mem.vector_store.updated_payload()["data"] == "用户在做造价审计项目。"
+
+
+def test_update_keeps_the_tags_when_the_categorizer_returns_garbage(quiet):
+    """An unparseable answer is "unknown", not "no match": the stored tags must survive."""
+    llm = DispatchingLLM("I could not decide, sorry.")
     mem = _memory_for_update(llm)
 
     mem.update(memory_id="m1", text="用户在做造价审计项目。")
