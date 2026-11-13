@@ -683,9 +683,19 @@ def list_bundled_providers(_auth=Depends(verify_auth)):
 
 @app.post("/configure", summary="Configure Mem0")
 def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
-    """Set memory configuration. Requires admin role."""
+    """Set memory configuration. Requires admin role.
+
+    A config that mem0 rejects (unknown provider/model) is a client error: update_config
+    applies changes atomically, so a rejected config leaves the running state untouched.
+    """
     _validate_bundled_providers(config)
-    update_config(config)
+    try:
+        update_config(config)
+    except ValueError as exc:  # pydantic.ValidationError subclasses ValueError
+        raise _client_error(exc)
+    except Exception as exc:
+        logging.exception("Failed to apply configuration: %s", exc)
+        raise upstream_error()
     return {"message": "Configuration set successfully"}
 
 

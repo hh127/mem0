@@ -8,6 +8,9 @@ from typing import Any, Callable, Dict
 from mem0 import Memory
 
 _state_lock = threading.RLock()
+# Serializes config mutations without holding _state_lock across Memory.from_config
+# (which opens provider clients and may do network I/O). Readers only need _state_lock.
+_update_lock = threading.Lock()
 _current_config: Dict[str, Any] = {}
 _memory_instance: Memory | None = None
 _session_factory: Callable | None = None
@@ -36,10 +39,11 @@ def _load_overrides() -> Dict[str, Any]:
         return {}
 
 
-def _save_overrides(overrides: Dict[str, Any]) -> None:
+def _save_overrides(overrides: Dict[str, Any]) -> bool:
+    """Persist config overrides; returns False when the write failed (caller rolls back)."""
     try:
         if _session_factory is None:
-            return
+            return True
         from models import Settings
         from sqlalchemy.dialects.postgresql import insert
 
@@ -58,8 +62,10 @@ def _save_overrides(overrides: Dict[str, Any]) -> None:
             session.commit()
         finally:
             session.close()
+        return True
     except Exception:
         logging.warning("Failed to persist config overrides to database", exc_info=True)
+        return False
 
 
 def _load_setting(key: str) -> str | None:
@@ -213,15 +219,29 @@ def initialize_state(default_config: Dict[str, Any]) -> None:
 
 
 def update_config(updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply a configuration change atomically.
+
+    The new ``Memory`` is built outside ``_state_lock`` on purpose: ``Memory.from_config``
+    opens provider clients (network I/O), and holding the state lock would block every
+    request that calls ``get_memory_instance()``. A failed build or failed persist must
+    leave the previous config + instance in place — the old implementation swapped the
+    config first, so one rejected config could leave the runtime permanently inconsistent.
+    """
     global _current_config, _memory_instance
-    with _state_lock:
-        next_config = _merge_config(_current_config, updates)
-        _current_config = next_config
-        _memory_instance = Memory.from_config(_without_disabled_categories(next_config))
+    with _update_lock:
+        with _state_lock:
+            next_config = _merge_config(_current_config, updates)
+        new_instance = Memory.from_config(_without_disabled_categories(next_config))
+        with _state_lock:
+            previous_config, previous_instance = _current_config, _memory_instance
+            _current_config, _memory_instance = next_config, new_instance
         overrides = _load_overrides()
         overrides = _merge_config(overrides, updates)
-        _save_overrides(overrides)
-        return deepcopy(_current_config)
+        if not _save_overrides(overrides):
+            with _state_lock:
+                _current_config, _memory_instance = previous_config, previous_instance
+            raise RuntimeError("Could not persist the new configuration.")
+        return deepcopy(next_config)
 
 
 def get_current_config() -> Dict[str, Any]:
