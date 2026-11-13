@@ -50,7 +50,7 @@
 
 ```bash
 cd server
-cp .env.example .env      # 至少填 POSTGRES_PASSWORD 和 OPENAI_API_KEY
+cp .env.example .env      # 至少填 POSTGRES_PASSWORD、JWT_SECRET（openssl rand -hex 32）和 OPENAI_API_KEY
 make bootstrap
 ```
 

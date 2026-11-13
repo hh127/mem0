@@ -54,7 +54,7 @@ One command starts the stack, creates an admin and issues the first API key:
 
 ```bash
 cd server
-cp .env.example .env      # set at least POSTGRES_PASSWORD and OPENAI_API_KEY
+cp .env.example .env      # set at least POSTGRES_PASSWORD, JWT_SECRET (openssl rand -hex 32) and OPENAI_API_KEY
 make bootstrap
 ```
 
