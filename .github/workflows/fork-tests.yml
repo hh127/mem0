@@ -48,7 +48,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y libgeos-dev
           python -m pip install --upgrade pip
-          pip install -e ".[test,llms,extras]" \
+          pip install -e ".[test,vector-stores,llms,extras]" pgvector \
             "fastapi==0.115.8" "pydantic[email]==2.10.4" python-dotenv requests \
             "psycopg[binary]" psycopg-pool sqlalchemy "passlib[bcrypt]" \
             "bcrypt==4.0.1" "python-jose[cryptography]" cryptography slowapi
