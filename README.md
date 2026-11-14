@@ -29,10 +29,13 @@
 
 ## 魔改规模
 
-截至 2026-11-14，相对上游基线 `94c3fe9f`（Python SDK 2.2.1 / TS SDK 3.3.1，2026-09-25）：
+截至 2026-11-14（已合并到上游 `f1791daa`，两侧版本均为 Python SDK 2.2.1 / TS SDK 3.3.1）：
 
-- **47 个自有提交**，97 个文件，**+11,659 / −1,036 行**
-- 大头在 Dashboard（47 个文件，+5,159 行）与服务端（`server/main.py` +592 行、`usage_hooks.py` +346 行）
+- **58 个自有提交**，105 个文件，**+12,097 / −1,072 行**（相对 `upstream/main`）
+- 大头在服务端：`server/` 65 个文件 +7,037 行（其中 Dashboard 47 个文件 +5,200 行、
+  `server/main.py` +626 行、`usage_hooks.py` +346 行）
+- 核心 SDK 只动 12 个文件 +1,227 行（衰减 / 分类 / 重排 / provider），测试新增 6 个文件 +1,794 行，
+  `integrations/` 9 个文件 +1,154 行
 
 ## 兼容性
 
@@ -141,15 +144,19 @@ make test          # 单元测试
 make test-full     # 全量回归（遥测感知分段跑，避免 posthog 撑爆内存）
 ```
 
-CI：`.github/workflows/fork-tests.yml` 跑 pytest（`tests/memory` + 分类相关用例）与 Dashboard
-typecheck；`.github/workflows/docker-build.yml` 负责 server / dashboard 双镜像构建。
+CI：`.github/workflows/fork-tests.yml` 跑全量 `pytest tests/` 与 Dashboard typecheck（可选 provider
+用例按设计 skip）；`.github/workflows/docker-build.yml` 负责 server / dashboard 双镜像构建。
 
 ## 与上游同步
 
 * `origin` → `github.com/hh127/mem0`（本分支），`upstream` → `github.com/mem0ai/mem0`。
+* **当前状态**：2026-11-14 已合并到上游 `f1791daa`，落后 0 个提交；之后建议每季度同步一次。
 * 上游改动按需 `git fetch upstream && git merge upstream/main`；上游的安全修复建议及时合并。
 * 本分支提交集中在 `server/`、`server/dashboard/`、`mem0/memory/`、
   `integrations/hermes-plugin-mem0/`，与上游重叠面小，冲突成本低。
+* **合并检查清单**（长期只有 4 个文件会冲突）：`README.md`、`mem0/memory/main.py`、
+  `mem0/vector_stores/pgvector.py`、`tests/vector_stores/test_pgvector.py`。合并后跑
+  `pytest tests/ -q` 与 `cd server/dashboard && pnpm typecheck` 即可。
 * 魔改全部落在源码里，没有 patch 脚本 —— 升级镜像后行为不变。
 
 ## 许可与出处
