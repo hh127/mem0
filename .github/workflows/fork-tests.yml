@@ -31,6 +31,7 @@ on:
       - "server/**"
       - "tests/**"
       - "pyproject.toml"
+      - ".github/workflows/fork-tests.yml"
   workflow_dispatch:
 
 jobs:
