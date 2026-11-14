@@ -16,11 +16,16 @@ import pytest
 import mem0.memory.main as main_mod
 
 
-NOW = datetime(2026, 9, 27, 12, 0, 0, tzinfo=timezone.utc)
-
-
 def _iso(days_ago: float) -> str:
-    return (NOW - timedelta(days=days_ago)).isoformat()
+    """Timestamp ``days_ago`` days before the real present.
+
+    ``decay_factor()`` reads the wall clock, so the fixtures must be anchored to
+    the real present too. A frozen ``NOW`` makes every fixture drift towards the
+    decay floor as the calendar advances: "fresh" (0 days) eventually decays to
+    the same 0.3x floor as "stale" (300 days), and this test then fails without
+    any code change.
+    """
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
 
 
 class FakeVectorStore:
