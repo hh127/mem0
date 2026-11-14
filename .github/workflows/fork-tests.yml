@@ -3,14 +3,18 @@ name: Fork Tests
 # 这个 fork 的回归门禁。docker-build.yml 只构建镜像（里面 next build 会挡类型错误），
 # 但没有任何 job 跑过 pytest —— 这里补上，避免「CI 绿 = 逻辑没坏」的误解。
 #
-# 只跑依赖轻、跑得快的两个包：
-#   - tests/memory/（上游内存层 + 本 fork 的分类器，458 项，约 8 秒）
-#   - tests/test_server_memory_categories.py（本 fork 的 REST 行为，12 项，约 1 分钟，
-#     慢在 server.main 的 import 会重导 mem0 全家桶）
-# ⚠️ 不跑全量 tests/：vector_stores / llms / embeddings 里有一批可选 provider 的用例
-#    需要额外重依赖（weaviate/pinecone/together 等），装齐了不划算。
-# ⚠️ tests/test_server_params.py 也能跑了（tests/conftest.py 提供了默认环境），
-#    但每个用例都要 reload server.main（约 50 秒/次），不进 CI。
+# 跑全量 pytest tests/（106 个测试文件、约 2200 项），覆盖：
+#   - 本 fork 的分类器 / 衰减 / 重排与服务端 REST 行为
+#   - 上游 SDK 的内存层、client、vector store、llms、embeddings 用例
+# 需要外部服务或未安装可选 provider 的用例会自行 skip（约 76 项），这是预期行为。
+#
+# 依赖与上游 ci.yml 对齐（[test,llms,extras] + 系统 libgeos），另外补上本 fork 的
+# server 运行时依赖（fastapi / psycopg / slowapi 等）；不装这些的话，服务端用例会被
+# pytest.importorskip 静默跳过，门禁就形同虚设。
+#
+# 历史：本 job 曾只跑 tests/memory + test_server_memory_categories.py，导致根目录的
+# tests/test_decay*.py 长期不被 CI 覆盖 —— 2026-11-14 有一个随日历腐化的测试在 main
+# 上红了数周才被发现。因此改为全量；如果只想跑快路径，请另开 job 而不是砍掉这里。
 
 on:
   push:
@@ -27,6 +31,7 @@ on:
       - "server/**"
       - "tests/**"
       - "pyproject.toml"
+      - ".github/workflows/fork-tests.yml"
   workflow_dispatch:
 
 jobs:
@@ -41,8 +46,9 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo apt-get update && sudo apt-get install -y libgeos-dev
           python -m pip install --upgrade pip
-          pip install -e . pytest pytest-mock pytest-asyncio \
+          pip install -e ".[test,vector-stores,llms,extras]" pgvector \
             "fastapi==0.115.8" "pydantic[email]==2.10.4" python-dotenv requests \
             "psycopg[binary]" psycopg-pool sqlalchemy "passlib[bcrypt]" \
             "bcrypt==4.0.1" "python-jose[cryptography]" cryptography slowapi
@@ -51,7 +57,11 @@ jobs:
         # PYTHONPATH 要同时含仓库根（mem0 包）和 server/（telemetry/auth 是顶层模块）
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/server
-        run: pytest tests/memory tests/test_server_memory_categories.py -q
+        # tests/test_server_auth.py 需要 docker-compose 里的 postgres（连接 host "postgres"）
+        # 与完整 auth 环境；CI 不提供数据库，上游自己的 ci.yml 也不跑它（未装 fastapi 时被
+        # importorskip 跳过）。本 fork 的服务端行为由 tests/test_server_memory_categories.py
+        # 覆盖，那个文件在这里是真实执行的。其余全量用例一律跑。
+        run: pytest tests/ -q --ignore=tests/test_server_auth.py
 
   dashboard-checks:
     runs-on: ubuntu-latest
