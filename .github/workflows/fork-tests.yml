@@ -57,7 +57,11 @@ jobs:
         # PYTHONPATH 要同时含仓库根（mem0 包）和 server/（telemetry/auth 是顶层模块）
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/server
-        run: pytest tests/ -q
+        # tests/test_server_auth.py 需要 docker-compose 里的 postgres（连接 host "postgres"）
+        # 与完整 auth 环境；CI 不提供数据库，上游自己的 ci.yml 也不跑它（未装 fastapi 时被
+        # importorskip 跳过）。本 fork 的服务端行为由 tests/test_server_memory_categories.py
+        # 覆盖，那个文件在这里是真实执行的。其余全量用例一律跑。
+        run: pytest tests/ -q --ignore=tests/test_server_auth.py
 
   dashboard-checks:
     runs-on: ubuntu-latest
