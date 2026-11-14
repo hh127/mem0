@@ -188,6 +188,35 @@ def test_apply_decay_handles_missing_score(enabled):
     assert out[0]["score"] == 0.0
 
 
+def test_apply_decay_ranks_by_rerank_score_when_present(enabled):
+    """A reranker's ordering must survive decay: rerank_score beats the old score."""
+    fresh = _iso(0)
+    items = [
+        {"id": "rerank-winner", "score": 0.1, "rerank_score": 0.9, "last_accessed_at": fresh},
+        {"id": "vector-winner", "score": 0.9, "rerank_score": 0.1, "last_accessed_at": fresh},
+    ]
+
+    out = enabled.apply_decay(items, limit=2, now=NOW)
+
+    assert [item["id"] for item in out] == ["rerank-winner", "vector-winner"]
+
+
+def test_apply_decay_reports_which_score_it_used(enabled):
+    items = [
+        {"id": "reranked", "score": 0.2, "rerank_score": 0.8, "last_accessed_at": _iso(0),
+         "score_details": {}},
+        {"id": "plain", "score": 0.2, "last_accessed_at": _iso(0), "score_details": {}},
+    ]
+
+    out = enabled.apply_decay(items, limit=2, now=NOW)
+    by_id = {item["id"]: item for item in out}
+
+    assert by_id["reranked"]["score_details"]["score_source"] == "rerank"
+    assert by_id["reranked"]["score_details"]["score_before_decay"] == pytest.approx(0.8)
+    assert by_id["plain"]["score_details"]["score_source"] == "score"
+    assert by_id["plain"]["score_details"]["score_before_decay"] == pytest.approx(0.2)
+
+
 # --------------------------------------------------------------------------
 # record_access
 # --------------------------------------------------------------------------

@@ -157,13 +157,32 @@ def decay_factor(item: Dict[str, Any], now: Optional[datetime] = None) -> float:
     return max(floor, min(ceil, floor + (ceil - floor) * recency))
 
 
+def _base_score(item: Dict[str, Any]) -> float:
+    """Relevance score that decay multiplies.
+
+    ``rerank_score`` (written by every reranker) wins over the pre-rerank ``score``:
+    otherwise decay re-sorts by the original vector relevance and silently discards
+    the reranking the caller paid for.
+    """
+    for key in ("rerank_score", "score"):
+        raw = item.get(key)
+        if raw is None:
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
 def apply_decay(
     items: List[Dict[str, Any]],
     limit: int,
     now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
-    """Multiply each result's score by its decay factor, reorder, truncate.
+    """Multiply each result's effective score by its decay factor, reorder, truncate.
 
+    The effective score is ``rerank_score`` when a reranker ran, else ``score``.
     Ranking uses the *unclamped* product so the full [FLOOR, CEIL] band can
     rearrange candidates; the ``score`` handed back to callers is clamped to
     [0, 1] so the public API contract is preserved.
@@ -175,10 +194,7 @@ def apply_decay(
     ranked = []
     for item in items:
         factor = decay_factor(item, now)
-        try:
-            base = float(item.get("score") or 0.0)
-        except (TypeError, ValueError):
-            base = 0.0
+        base = _base_score(item)
 
         enriched = dict(item)
         enriched["score"] = max(0.0, min(1.0, base * factor))
@@ -187,6 +203,7 @@ def apply_decay(
             details = dict(details)
             details["decay_factor"] = factor
             details["score_before_decay"] = base
+            details["score_source"] = "rerank" if item.get("rerank_score") is not None else "score"
             enriched["score_details"] = details
         ranked.append((base * factor, enriched))
 

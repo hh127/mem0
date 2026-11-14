@@ -21,19 +21,35 @@ const redirectToLogin = () => {
   }
 };
 
-const refreshAccessToken = async () => {
-  const refreshResponse = await fetch("/api/auth/refresh", {
-    method: "POST",
-    credentials: "include",
-  });
+// Single-flight refresh: several requests can 401 at the same time (the memories page
+// fires /memories, /entities and /categories in parallel). Refreshing once and sharing the
+// promise avoids racing a rotating refresh token, which would otherwise log the user out.
+let refreshInFlight: Promise<string | null> | null = null;
 
-  if (!refreshResponse.ok) {
-    return null;
+const refreshAccessToken = (): Promise<string | null> => {
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      try {
+        const refreshResponse = await fetch("/api/auth/refresh", {
+          method: "POST",
+          credentials: "include",
+        });
+
+        if (!refreshResponse.ok) {
+          return null;
+        }
+
+        const data = await refreshResponse.json();
+        setAccessToken(data.access_token);
+        return data.access_token as string;
+      } catch {
+        return null;
+      } finally {
+        refreshInFlight = null;
+      }
+    })();
   }
-
-  const data = await refreshResponse.json();
-  setAccessToken(data.access_token);
-  return data.access_token as string;
+  return refreshInFlight;
 };
 
 const createApi = (): AxiosInstance & {

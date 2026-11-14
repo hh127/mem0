@@ -1,0 +1,23 @@
+# The build context is the REPO ROOT (server/Dockerfile installs the in-repo mem0
+# package from it), so keep everything the image does not need out of the context.
+# This also keeps local secrets out: server/.env is never baked into an image.
+.git
+.github
+.gitattributes
+**/__pycache__
+**/*.pyc
+**/.next
+**/node_modules
+**/.venv
+**/venv
+**/.pytest_cache
+**/.env
+*.log
+docs
+examples
+skills
+cli
+mem0-ts
+tests
+integrations
+evaluation

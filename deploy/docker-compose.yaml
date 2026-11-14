@@ -8,7 +8,8 @@ services:
     shm_size: "128mb"
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-mem0}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      # 必填：留空时 compose 会拒绝启动（deploy/.env 里没填 POSTGRES_PASSWORD）
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
       - POSTGRES_DB=${POSTGRES_DB:-mem0}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -q -d ${POSTGRES_DB:-mem0} -U ${POSTGRES_USER:-mem0}"]
@@ -19,7 +20,9 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
     ports:
-      - "15432:5432"
+      # 只绑本机回环，供 NAS 本机排查用；不需要就整段删掉。
+      # 千万不要写成 "15432:5432" —— 那会把数据库暴露给整个局域网。
+      - "127.0.0.1:15432:5432"
     networks:
       - mem0
 
@@ -34,7 +37,7 @@ services:
       - POSTGRES_PORT=5432
       - POSTGRES_DB=${POSTGRES_DB:-mem0}
       - POSTGRES_USER=${POSTGRES_USER:-mem0}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
       - APP_DB_NAME=mem0_app
     depends_on:
       postgres:
@@ -49,11 +52,13 @@ services:
     container_name: mem0-dashboard
     restart: unless-stopped
     environment:
-      - NEXT_PUBLIC_API_URL=http://${NAS_IP:-192.168.4.132}:6688
+      # 必须是浏览器能访问到的地址（NAS_IP 填 NAS 的局域网 IP）
+      - NEXT_PUBLIC_API_URL=http://${NAS_IP:-127.0.0.1}:6688
       - API_INTERNAL_URL=http://mem0-server:8000
       - NEXT_PUBLIC_INSTANCE_NAME=Mem0
     depends_on:
-      - mem0-server
+      mem0-server:
+        condition: service_started
     ports:
       - "3000:3000"
     networks:

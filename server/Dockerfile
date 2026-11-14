@@ -21,8 +21,14 @@ RUN pip install --no-cache-dir --no-deps /tmp/mem0-src && rm -rf /tmp/mem0-src
 
 COPY server/ .
 
+# Apply migrations at container start (see entrypoint.sh). `sed` strips CR in case the
+# repo was checked out on Windows with core.autocrlf=true, which would break the shebang.
+RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
+
 EXPOSE 8000
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# No --reload in production: it is for local development only and adds a watcher process.
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

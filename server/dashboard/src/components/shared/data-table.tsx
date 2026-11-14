@@ -20,6 +20,8 @@ interface DataTableProps<T> {
   getRowKey?: (row: T, rowIndex: number) => string | number;
   onRowClick?: (row: T, rowIndex: number) => void;
   getRowClassName?: (row: T, rowIndex: number) => string | undefined;
+  /** 表头「勾选」列的内容（通常是全选复选框）；不传则渲染原来的占位空框。 */
+  headerCheck?: ReactNode;
 }
 
 const classes = {
@@ -49,6 +51,7 @@ export function DataTable<T>({
   getRowKey,
   onRowClick,
   getRowClassName,
+  headerCheck,
 }: DataTableProps<T>) {
   const minHeight = data.length > 0 ? Math.max(76, 38 + data.length * 38) : 100;
   // Proportional column widths so table fits container (width numbers treated as relative weights)
@@ -82,7 +85,9 @@ export function DataTable<T>({
                   <th key={index} className={classes.tableHeaderCheckCell}>
                     <div className="flex h-full items-stretch justify-between">
                       <div className={classes.tableHeaderCheckWrap}>
-                        <span className={classes.tableHeaderCheckBox} />
+                        {headerCheck ?? (
+                          <span className={classes.tableHeaderCheckBox} />
+                        )}
                       </div>
                       {!isLastColumn && (
                         <div className={classes.tableHeaderDivider} />

@@ -3,8 +3,14 @@
 import { Clock, Pencil, Tag } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { CategoryTag } from "@/components/categories/category-tag";
-import { categoriesOf, expiryLabel, relativeTime, sourceLabel } from "@/lib/category-utils";
+import {
+  categoriesOf,
+  expiryLabel,
+  relativeTime,
+  sourceLabel,
+} from "@/lib/category-utils";
 import { cn } from "@/lib/utils";
 import type { Memory } from "@/types/api";
 
@@ -18,11 +24,18 @@ export function MemoryCard({
   memory,
   onOpen,
   onEdit,
+  selectable = false,
+  selected = false,
+  onToggleSelect,
   className,
 }: {
   memory: Memory;
   onOpen?: (memory: Memory) => void;
   onEdit?: (memory: Memory) => void;
+  /** true = 卡片进入「批量选择」态：点卡片即勾选/取消，不再打开详情。 */
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (memory: Memory) => void;
   className?: string;
 }) {
   const categories = categoriesOf(memory);
@@ -32,13 +45,39 @@ export function MemoryCard({
     <Card
       className={cn(
         "border-memBorder-primary transition-colors",
-        onOpen && "cursor-pointer hover:border-onSurface-default-brand/40",
+        (onOpen || selectable) &&
+          "cursor-pointer hover:border-onSurface-default-brand/40",
+        selectable && "relative",
+        selectable &&
+          selected &&
+          "border-onSurface-default-brand ring-1 ring-onSurface-default-brand",
         className,
       )}
-      onClick={onOpen ? () => onOpen(memory) : undefined}
+      onClick={
+        selectable
+          ? () => onToggleSelect?.(memory)
+          : onOpen
+            ? () => onOpen(memory)
+            : undefined
+      }
     >
+      {selectable && (
+        <span className="absolute right-3 top-3 z-10">
+          <Checkbox
+            checked={selected}
+            aria-label={`选择记忆 ${memory.id}`}
+            onCheckedChange={() => onToggleSelect?.(memory)}
+            onClick={(event) => event.stopPropagation()}
+          />
+        </span>
+      )}
       <CardContent className="p-4 space-y-3">
-        <p className="typo-body-sm text-onSurface-default-primary leading-relaxed">
+        <p
+          className={cn(
+            "typo-body-sm text-onSurface-default-primary leading-relaxed",
+            selectable && "pr-6",
+          )}
+        >
           {memory.memory}
         </p>
 
