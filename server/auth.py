@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from db import SessionLocal
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request, Response
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from models import APIKey, RefreshTokenJti, User
@@ -18,6 +18,27 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 REFRESH_TOKEN_EXPIRE_DAYS = 30
 ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
 AUTH_DISABLED = os.environ.get("AUTH_DISABLED", "").lower() in {"1", "true", "yes", "on"}
+MIN_PASSWORD_LENGTH = 8
+
+# --- Web console (Vite SPA behind a same-origin nginx proxy) -------------------
+# The console keeps its refresh token in an httpOnly cookie. The body-token flow
+# (dashboard) keeps working unchanged: every auth endpoint returns the tokens in
+# the JSON body AND sets the cookie, so neither client depends on the other.
+CONSOLE_COOKIE_NAME = os.environ.get("CONSOLE_COOKIE_NAME", "mem0_console_rt")
+REFRESH_COOKIE_MAX_AGE = REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://localhost:3000")
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Secure cookies require a TLS deployment. Infer from DASHBOARD_URL (https implies TLS)
+# unless the operator pins the value explicitly with CONSOLE_COOKIE_SECURE.
+CONSOLE_COOKIE_SECURE = _env_flag("CONSOLE_COOKIE_SECURE", DASHBOARD_URL.strip().lower().startswith("https://"))
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -33,6 +54,15 @@ def verify_password(plain: str, hashed: str) -> bool:
 def dummy_verify_password() -> None:
     """Burn the same bcrypt cycles as a real verify so login timing doesn't leak whether an email exists."""
     pwd_context.dummy_verify()
+
+
+def require_password_length(password: str) -> None:
+    """Reject passwords shorter than the shared minimum (400, same rule everywhere)."""
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at least {MIN_PASSWORD_LENGTH} characters.",
+        )
 
 
 def generate_api_key() -> tuple[str, str, str]:
@@ -101,6 +131,85 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail="Invalid or expired token.")
 
 
+# --- httpOnly refresh-token cookie -------------------------------------------
+
+
+def set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    """Attach the console's httpOnly refresh-token cookie to a successful auth response.
+
+    SameSite=Lax (not None) because the console is served same-origin behind nginx; the
+    body token flow never reads this cookie, so a CSRF-strict setting costs nothing.
+    """
+    response.set_cookie(
+        key=CONSOLE_COOKIE_NAME,
+        value=refresh_token,
+        max_age=REFRESH_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=CONSOLE_COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
+
+
+def clear_refresh_cookie(response: Response) -> None:
+    """Expire the console cookie (used by /auth/logout)."""
+    response.delete_cookie(
+        key=CONSOLE_COOKIE_NAME,
+        path="/",
+        secure=CONSOLE_COOKIE_SECURE,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def refresh_token_from_cookie(request: Request) -> str | None:
+    value = request.cookies.get(CONSOLE_COOKIE_NAME)
+    return value or None
+
+
+# --- Role / memory-scope helpers ---------------------------------------------
+
+
+def is_admin_caller(request: Request, user: User | None) -> bool:
+    """True for admin-role users and the legacy admin API key / AUTH_DISABLED paths.
+
+    ``verify_auth`` returns ``None`` for the legacy paths, so the auth type recorded on
+    ``request.state`` (not the returned user) decides their effective role.
+    """
+    if getattr(request.state, "auth_type", "none") in {"admin_api_key", "disabled"}:
+        return True
+    return user is not None and user.role == "admin"
+
+
+def enforce_memory_scope(request: Request, user: User | None) -> str | None:
+    """Return the memory scope a non-admin caller is confined to, or ``None`` for admins.
+
+    A non-admin account without ``memory_scope`` cannot access any memory: failing closed
+    is safer than treating a missing scope as "unrestricted".
+    """
+    if is_admin_caller(request, user):
+        return None
+    scope = (user.memory_scope or "").strip() if user is not None else ""
+    if not scope:
+        raise HTTPException(
+            status_code=403,
+            detail="This account has no memory scope assigned. Ask an administrator to set one.",
+        )
+    return scope
+
+
+def memory_user_id(memory) -> str | None:
+    """Extract the owning ``user_id`` from a Memory.get() dict or a vector-store row."""
+    if memory is None:
+        return None
+    if isinstance(memory, dict):
+        value = memory.get("user_id")
+    else:
+        payload = getattr(memory, "payload", None) or {}
+        value = payload.get("user_id")
+    return str(value) if value else None
+
+
 bearer_scheme = HTTPBearer(auto_error=False)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -113,13 +222,27 @@ def _get_default_user(db: Session) -> User | None:
     return db.scalar(select(User).order_by(User.created_at.asc()))
 
 
+def _uuid_from_token_sub(value) -> uuid.UUID | None:
+    """JWT ``sub`` is a string; parse it before binding a UUID column (also works on SQLite)."""
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _resolve_user_from_jwt(token: str, db: Session) -> User:
     payload = decode_token(token)
     if payload.get("type") != "access":
         raise HTTPException(status_code=401, detail="Invalid token type.")
-    user = db.get(User, payload.get("sub"))
+    user_id = _uuid_from_token_sub(payload.get("sub"))
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid token.")
+    user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="User not found.")
+    if not user.is_active:
+        # A deactivated account must lose API access immediately, not when its token expires.
+        raise HTTPException(status_code=401, detail="Invalid credentials.")
     return user
 
 
@@ -136,6 +259,8 @@ def _resolve_user_from_api_key(key: str, db: Session) -> User:
             user = db.get(User, candidate.created_by)
             if user is None:
                 raise HTTPException(status_code=401, detail="API key owner not found.")
+            if not user.is_active:
+                raise HTTPException(status_code=401, detail="Invalid API key.")
             return user
 
     raise HTTPException(status_code=401, detail="Invalid API key.")

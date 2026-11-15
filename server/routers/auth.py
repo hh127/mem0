@@ -1,20 +1,25 @@
+import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from auth import (
+    clear_refresh_cookie,
     consume_refresh_jti,
     create_access_token,
     create_refresh_token,
     decode_token,
     dummy_verify_password,
     hash_password,
+    refresh_token_from_cookie,
     require_auth,
+    require_password_length,
+    set_refresh_cookie,
     verify_password,
 )
 from db import get_db
@@ -24,16 +29,6 @@ from schemas import MessageResponse
 from telemetry import capture_admin_registered, capture_onboarding_completed
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-MIN_PASSWORD_LENGTH = 8
-
-
-def _require_password_length(password: str) -> None:
-    if len(password) < MIN_PASSWORD_LENGTH:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Password must be at least {MIN_PASSWORD_LENGTH} characters.",
-        )
 
 
 class RegisterRequest(BaseModel):
@@ -52,7 +47,11 @@ class LoginRequest(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str | None = None
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str | None = None
 
 
 class UpdateProfileRequest(BaseModel):
@@ -76,6 +75,8 @@ class UserResponse(BaseModel):
     name: str
     email: str
     role: str
+    memory_scope: str | None = None
+    is_active: bool = True
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -91,11 +92,26 @@ def setup_status(db: Session = Depends(get_db)):
     return SetupStatusResponse(needsSetup=count == 0)
 
 
+def _issue_tokens(response: Response, user: User, db: Session) -> TokenResponse:
+    """Mint a token pair, set the console's httpOnly refresh cookie, and return the body.
+
+    Both delivery channels are always populated: the dashboard keeps using the body
+    tokens, the Vite console keeps the refresh token in the cookie only.
+    """
+    access_token = create_access_token(str(user.id), user.role)
+    refresh_token = create_refresh_token(str(user.id), db)
+    set_refresh_cookie(response, refresh_token)
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
+
 @router.post("/register", response_model=TokenResponse)
 @limiter.limit("5/minute")
-def register(request: Request, body: RegisterRequest, db: Session = Depends(get_db)):
-    """Create the first admin account. Blocked once any user exists."""
-    _require_password_length(body.password)
+def register(request: Request, response: Response, body: RegisterRequest, db: Session = Depends(get_db)):
+    """Create the first admin account. Blocked once any user exists.
+
+    Additional accounts (regular users included) are created by an admin via ``POST /users``.
+    """
+    require_password_length(body.password)
 
     if db.scalar(select(func.count(User.id))) > 0:
         raise HTTPException(status_code=403, detail="Registration is closed. An admin account already exists.")
@@ -116,35 +132,47 @@ def register(request: Request, body: RegisterRequest, db: Session = Depends(get_
 
     capture_admin_registered(email=body.email)
 
-    return TokenResponse(
-        access_token=create_access_token(str(user.id), user.role),
-        refresh_token=create_refresh_token(str(user.id), db),
-    )
+    return _issue_tokens(response, user, db)
 
 
 @router.post("/login", response_model=TokenResponse)
 @limiter.limit("10/minute")
-def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)):
+def login(request: Request, response: Response, body: LoginRequest, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == body.email))
     if user is None:
         dummy_verify_password()
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     if not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
+    if not user.is_active:
+        # Same generic message as a wrong password: never reveal that an account exists
+        # but has been deactivated.
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     user.last_login_at = datetime.now(timezone.utc)
     db.commit()
 
-    return TokenResponse(
-        access_token=create_access_token(str(user.id), user.role),
-        refresh_token=create_refresh_token(str(user.id), db),
-    )
+    return _issue_tokens(response, user, db)
 
 
 @router.post("/refresh", response_model=TokenResponse)
 @limiter.limit("20/minute")
-def refresh(request: Request, body: RefreshRequest, db: Session = Depends(get_db)):
-    payload = decode_token(body.refresh_token)
+def refresh(
+    request: Request,
+    response: Response,
+    body: RefreshRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    """Rotate a refresh token.
+
+    The token is read from the JSON body first (dashboard), then from the console's
+    httpOnly cookie. Either way the old jti is consumed and a fresh cookie is set.
+    """
+    token = (body.refresh_token if body and body.refresh_token else None) or refresh_token_from_cookie(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Refresh token is required.")
+
+    payload = decode_token(token)
     if payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid token type.")
 
@@ -152,16 +180,48 @@ def refresh(request: Request, body: RefreshRequest, db: Session = Depends(get_db
     if not jti:
         raise HTTPException(status_code=401, detail="Refresh token is no longer valid.")
 
-    user = db.get(User, payload["sub"])
+    try:
+        user_id = uuid.UUID(str(payload.get("sub")))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid token.")
+    user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="User not found.")
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="Invalid credentials.")
 
     consume_refresh_jti(jti, db)
 
-    return TokenResponse(
-        access_token=create_access_token(str(user.id), user.role),
-        refresh_token=create_refresh_token(str(user.id), db),
-    )
+    return _issue_tokens(response, user, db)
+
+
+@router.post("/logout", response_model=MessageResponse)
+def logout(
+    request: Request,
+    response: Response,
+    body: LogoutRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    """Invalidate the caller's refresh token and clear the console cookie.
+
+    Idempotent and unauthenticated on purpose: a missing, malformed, already-used or
+    expired token still returns 200, so a client can always drop its session locally.
+    """
+    token = (body.refresh_token if body and body.refresh_token else None) or refresh_token_from_cookie(request)
+    if token:
+        try:
+            payload = decode_token(token)
+            jti = payload.get("jti")
+            if payload.get("type") == "refresh" and jti:
+                consume_refresh_jti(jti, db)
+        except HTTPException:
+            # Missing/expired/rotated token: logout is idempotent, so this is expected.
+            logging.debug("Logout ignored an unusable refresh token")
+        except Exception:
+            logging.warning("Logout could not revoke the refresh token", exc_info=True)
+
+    clear_refresh_cookie(response)
+    return MessageResponse(message="Logged out.")
 
 
 @router.get("/me", response_model=UserResponse)
@@ -206,7 +266,7 @@ def change_password(
     if db_user is None or not verify_password(body.current_password, db_user.password_hash):
         raise HTTPException(status_code=401, detail="Current password is incorrect.")
 
-    _require_password_length(body.new_password)
+    require_password_length(body.new_password)
 
     db_user.password_hash = hash_password(body.new_password)
     db.commit()

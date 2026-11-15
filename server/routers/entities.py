@@ -2,9 +2,9 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from auth import require_admin
+from auth import enforce_memory_scope, require_admin, verify_auth
 from errors import upstream_error
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from schemas import MessageResponse
 from server_state import get_memory_instance
@@ -40,13 +40,38 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
         return None
 
 
-@router.get("", response_model=list[Entity])
-def list_entities(_auth=Depends(require_admin)):
-    """List every user/agent/run entity and its memory count (admin-only).
+def _scoped_entities(scope: str) -> list[Entity]:
+    """The single entity a non-admin may see: their own ``user`` scope."""
+    bucket: dict[str, Any] = {"total_memories": 0, "created_at": None, "updated_at": None}
+    for payload in _iter_payloads():
+        # Agent/run entities are out of scope for non-admins, and so is any memory
+        # owned by a different user.
+        if payload.get("user_id") != scope:
+            continue
+        created = _parse_timestamp(payload.get("created_at"))
+        updated = _parse_timestamp(payload.get("updated_at")) or created
+        bucket["total_memories"] += 1
+        if created and (bucket["created_at"] is None or created < bucket["created_at"]):
+            bucket["created_at"] = created
+        if updated and (bucket["updated_at"] is None or updated > bucket["updated_at"]):
+            bucket["updated_at"] = updated
 
-    The response enumerates all tenant identifiers, so it is restricted to admins just
-    like the request logs endpoint.
+    if not bucket["total_memories"]:
+        return []
+    return [Entity(id=scope, type="user", **bucket)]
+
+
+@router.get("", response_model=list[Entity])
+def list_entities(request: Request, _auth=Depends(verify_auth)):
+    """List every user/agent/run entity and its memory count.
+
+    Admins see the full inventory. Non-admins get at most one row: their own ``user``
+    entity (and an empty list when they have no memories yet).
     """
+    scope = enforce_memory_scope(request, _auth)
+    if scope is not None:
+        return _scoped_entities(scope)
+
     buckets: dict[tuple[EntityType, str], dict[str, Any]] = defaultdict(
         lambda: {"total_memories": 0, "created_at": None, "updated_at": None}
     )

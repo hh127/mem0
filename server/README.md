@@ -79,6 +79,106 @@ make up
 - 认证默认开启。
 - `AUTH_DISABLED=true` 仅供本地开发，不要用于生产。
 
+## 多用户与 Web 控制台
+
+`server/console` 是一套独立于 `server/dashboard` 的 Vite SPA，通过 nginx 同源反代访问本服务端
+（`/api/xxx` → `/xxx`）。两套前端可以同时使用：服务端同时支持「响应体返回 token」（dashboard 现状）
+和「httpOnly cookie 保存 refresh token」（console）。
+
+### cookie 会话
+
+`/auth/register`、`/auth/login`、`/auth/refresh` 成功时都会：
+
+- 在响应体返回原来的 `access_token` / `refresh_token`（dashboard 不受影响）；
+- 额外 `Set-Cookie` 写入 refresh token：`HttpOnly`、`SameSite=Lax`、`Path=/`、
+  `Max-Age=2592000`（30 天），`Secure` 由 `CONSOLE_COOKIE_SECURE` 决定
+  （不设置时按 `DASHBOARD_URL` 是否 `https://` 推断）。
+
+`POST /auth/refresh` 优先读 `body.refresh_token`，缺失时读 cookie；两者都缺失返回 401。
+refresh token 依旧一次性：旧 jti 会被标记为已用并轮换（重放返回 401）。
+`POST /auth/logout` 无需登录、始终返回 200：有可用 refresh token 时把它的 jti 标记为已用，
+并清空 cookie（`Max-Age=0`），因此重复调用是幂等的。`POST /auth/register` 仍只允许创建
+**第一个**管理员，其余账号由管理员通过 `/users` 创建。
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `CONSOLE_COOKIE_NAME` | `mem0_console_rt` | refresh token 的 cookie 名 |
+| `CONSOLE_COOKIE_SECURE` | 按 `DASHBOARD_URL` 推断 | cookie 的 `Secure` 属性；TLS 部署建议显式 `true` |
+| `CORS_ORIGINS` | 空 | 额外允许的浏览器来源（逗号分隔），与 `DASHBOARD_URL` 合并去重；不要填 `*` |
+
+浏览器端用 `fetch(..., {credentials: "include"})` 调用即可；access token 仍放在
+`Authorization: Bearer <token>` 头里。
+
+### nginx 同源反代示例
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name mem0.example.com;
+
+    # 静态资源：Vite 构建产物
+    root /usr/share/nginx/html;
+    location / {
+        try_files $uri /index.html;
+    }
+
+    # /api/xxx -> http://mem0:8000/xxx（proxy_pass 末尾的 / 负责去掉 /api 前缀）
+    location /api/ {
+        proxy_pass http://mem0:8000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+因为 console 与 API 同源，cookie 不需要 `SameSite=None`，也不需要把 API 域名暴露给浏览器。
+
+### 用户与 `memory_scope`
+
+管理员通过 `POST /users` 创建普通账号，`role` 为 `user` 或 `admin`，并可指定
+`memory_scope`（≤128 字符的任意字符串，通常就是该账号对应的 `user_id`）。
+用户响应体只包含 `id/name/email/role/memory_scope/is_active/created_at/last_login_at`，
+永远不含 `password_hash`。
+
+- **admin**：不受限制，可列出/搜索/修改任意记忆（与原有行为一致）。
+- **普通用户且已分配 `memory_scope`**：
+  - `GET /memories` 必须带 `user_id` 且等于自己的 scope，否则 403；只带 `agent_id`/`run_id` 也 403。
+  - `POST /search` 强制 `filters["user_id"] = scope`（客户端传入值被覆盖，`agent_id`/`run_id` 保留）。
+  - `POST /memories` 强制 `user_id = scope`（覆盖客户端值，其它标识保留）。
+  - `GET/PUT/DELETE /memories/{id}`、`GET /memories/{id}/history`：非本人记忆一律 404（不泄露存在性）。
+  - `GET /entities` 只返回自己那条 `user` 实体（无记忆时为空数组）。
+- **普通用户但未分配 `memory_scope`**：所有记忆相关接口 403（fail closed），需管理员先分配。
+- **API Key**：沿用创建者的身份与作用域，非管理员创建的 key 同样受 scope 限制。
+- 术语里的 `user_id` 是记忆的归属标识，不是数据库主键；管理员可通过 `PATCH /users/{id}`
+  调整 `memory_scope`，后续请求立即生效。
+
+`is_active=false` 的账号在登录、刷新、以及任何已签发 access token 的请求上都会被拒绝
+（401，不区分「密码错误」和「已停用」）。最后一个处于启用状态的管理员不能被降级/停用/删除
+（最后一个管理员也不能删除自己）。
+
+### 数据库迁移
+
+用户表新增 `memory_scope`、`is_active`，并删除 004 建立的「最多一个 admin」部分唯一索引
+（允许创建第二个管理员；最后管理员保护改由 API 层负责）。容器启动时会自动执行
+`alembic upgrade head`，也可以手动：
+
+```bash
+cd server
+
+# Docker 栈
+docker compose exec mem0 alembic upgrade head
+docker compose exec mem0 alembic downgrade 008   # 回滚（要求 admin 数量 ≤ 1）
+
+# 或使用本机 Python 环境（server/ 为工作目录）
+alembic upgrade head
+```
+
+> 回滚到 008 前必须保证只剩一个管理员：004 的部分唯一索引在存在多个 admin 时会重新创建失败，
+> 迁移会提前报错并保持 009 不变。
+
+
 ## 忘记密码
 
 栈在运行时，从宿主机重置管理员密码：

@@ -16,7 +16,15 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 import telemetry
-from auth import ADMIN_API_KEY, AUTH_DISABLED, JWT_SECRET, require_admin, verify_auth
+from auth import (
+    ADMIN_API_KEY,
+    AUTH_DISABLED,
+    JWT_SECRET,
+    enforce_memory_scope,
+    memory_user_id,
+    require_admin,
+    verify_auth,
+)
 from db import SessionLocal
 from errors import (
     UpstreamError,
@@ -36,6 +44,7 @@ from routers import api_keys as api_keys_router
 from routers import auth as auth_router
 from routers import entities as entities_router
 from routers import requests as requests_router
+from routers import users as users_router
 from schemas import MessageResponse
 from server_state import (
     get_current_config,
@@ -271,9 +280,21 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_exception_handler(UpstreamError, upstream_error_handler)
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://localhost:3000")
+# Extra browser origins allowed to call the API with credentials (the Vite console normally
+# proxies same-origin through nginx, but a dev server on :5173 needs its own entry).
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", "").split(",")
+    if origin.strip() and origin.strip() != "*"
+]
+if any(origin.strip() == "*" for origin in os.environ.get("CORS_ORIGINS", "").split(",")):
+    logging.warning(
+        "CORS_ORIGINS contains '*' which is ignored: credentials cannot be combined with a wildcard origin."
+    )
+ALLOWED_ORIGINS = list(dict.fromkeys([DASHBOARD_URL, *CORS_ORIGINS]))
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[DASHBOARD_URL],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -283,6 +304,7 @@ app.include_router(auth_router.router)
 app.include_router(api_keys_router.router)
 app.include_router(entities_router.router)
 app.include_router(requests_router.router)
+app.include_router(users_router.router)
 
 
 class Message(BaseModel):
@@ -827,9 +849,35 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
         raise upstream_error()
 
 
+def _authorize_memory_access(memory_id: str, request: Request, user) -> Any | None:
+    """Confine non-admin callers to memories in their own memory_scope.
+
+    Returns the fetched memory for a non-admin caller (so the caller can reuse it) and
+    ``None`` for admins, whose behaviour is unchanged. A memory owned by somebody else
+    answers 404, never 403 — existence must not leak across tenants.
+    """
+    scope = enforce_memory_scope(request, user)
+    if scope is None:
+        return None
+    try:
+        memory = get_memory_instance().get(memory_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Memory not found.")
+    if memory is None or memory_user_id(memory) != scope:
+        raise HTTPException(status_code=404, detail="Memory not found.")
+    return memory
+
+
 @app.post("/memories", summary="Create memories")
-def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
-    """Store new memories."""
+def add_memory(memory_create: MemoryCreate, request: Request, _auth=Depends(verify_auth)):
+    """Store new memories.
+
+    Non-admin callers always write into their own ``memory_scope``: a client-supplied
+    ``user_id`` is overwritten (agent_id/run_id are kept).
+    """
+    scope = enforce_memory_scope(request, _auth)
+    if scope is not None:
+        memory_create.user_id = scope  # overwrite, not merge: a tenant cannot add for another
     if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
         raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
 
@@ -897,12 +945,20 @@ def get_all_memories(
     show_expired: bool = Query(False),
     _auth=Depends(verify_auth),
 ):
-    """Retrieve stored memories. Lists all memories when no identifier is provided (admin only)."""
+    """Retrieve stored memories. Lists all memories when no identifier is provided (admin only).
+
+    Non-admin callers must pass ``user_id`` and it must equal their own ``memory_scope``;
+    passing only ``agent_id``/``run_id`` is rejected because the scope must stay pinned to
+    a single user.
+    """
     try:
-        if not any([user_id, run_id, agent_id]):
-            auth_type = getattr(request.state, "auth_type", "none")
-            if _auth is not None and _auth.role != "admin" and auth_type not in {"admin_api_key", "disabled"}:
+        scope = enforce_memory_scope(request, _auth)
+        if scope is not None:
+            if not any([user_id, run_id, agent_id]):
                 raise HTTPException(status_code=403, detail="Admin role required to list all memories.")
+            if user_id != scope:
+                raise HTTPException(status_code=403, detail="You can only access memories in your own scope.")
+        if not any([user_id, run_id, agent_id]):
             # Admin all-memory listing is intentionally raw; scoped get_all below applies expiry visibility.
             return _list_all_memories(limit=top_k if top_k is not None else ALL_MEMORIES_LIMIT)
         filters = {
@@ -920,8 +976,11 @@ def get_all_memories(
 
 
 @app.get("/memories/{memory_id}", summary="Get a memory")
-def get_memory(memory_id: str, _auth=Depends(verify_auth)):
+def get_memory(memory_id: str, request: Request, _auth=Depends(verify_auth)):
     """Retrieve a specific memory by ID."""
+    memory = _authorize_memory_access(memory_id, request, _auth)
+    if memory is not None:
+        return memory
     try:
         return get_memory_instance().get(memory_id)
     except Exception:
@@ -929,10 +988,15 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 
 
 @app.post("/search", summary="Search memories")
-def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
-    """Search for memories based on a query."""
+def search_memories(search_req: SearchRequest, request: Request, _auth=Depends(verify_auth)):
+    """Search for memories based on a query.
+
+    Non-admin callers are forced to ``filters["user_id"] == memory_scope``; any client
+    supplied ``user_id`` (in ``filters`` or the deprecated top-level field) is overwritten.
+    """
     try:
-        filters = search_req.filters or {}
+        scope = enforce_memory_scope(request, _auth)
+        filters = dict(search_req.filters or {})
         deprecated_keys = []
         for entity_key in ("user_id", "agent_id", "run_id"):
             entity_val = getattr(search_req, entity_key, None)
@@ -945,6 +1009,8 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
                 ", ".join(deprecated_keys),
                 ", ".join(f'"{k}": "..."' for k in deprecated_keys),
             )
+        if scope is not None:
+            filters["user_id"] = scope
         set_usage_context(user_id=filters.get("user_id"), operation="search")
         params = {}
         if search_req.top_k is not None:
@@ -967,13 +1033,14 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 
 
 @app.put("/memories/{memory_id}", summary="Update a memory")
-def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(verify_auth)):
+def update_memory(memory_id: str, updated_memory: MemoryUpdate, request: Request, _auth=Depends(verify_auth)):
     """Update an existing memory.
 
     ``categories`` is a top-level payload field (same level as ``data``), so a manual
     re-tag rides the existing metadata merge inside ``Memory.update`` — the caller's
-    metadata, if any, is preserved.
+    metadata, if any, is preserved. Non-admins may only touch memories in their scope.
     """
+    _authorize_memory_access(memory_id, request, _auth)
     try:
         fields_set = getattr(updated_memory, "model_fields_set", getattr(updated_memory, "__fields_set__", set()))
         params: Dict[str, Any] = {"memory_id": memory_id}
@@ -995,8 +1062,9 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
 
 
 @app.get("/memories/{memory_id}/history", summary="Get memory history")
-def memory_history(memory_id: str, _auth=Depends(verify_auth)):
-    """Retrieve memory history."""
+def memory_history(memory_id: str, request: Request, _auth=Depends(verify_auth)):
+    """Retrieve memory history. Non-admins may only read history in their scope."""
+    _authorize_memory_access(memory_id, request, _auth)
     try:
         return get_memory_instance().history(memory_id=memory_id)
     except Exception:
@@ -1004,8 +1072,9 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 
 
 @app.delete("/memories/{memory_id}", summary="Delete a memory", response_model=MessageResponse)
-def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
-    """Delete a specific memory by ID."""
+def delete_memory(memory_id: str, request: Request, _auth=Depends(verify_auth)):
+    """Delete a specific memory by ID. Non-admins may only delete memories in their scope."""
+    _authorize_memory_access(memory_id, request, _auth)
     try:
         get_memory_instance().delete(memory_id=memory_id)
         return MessageResponse(message="Memory deleted successfully")
