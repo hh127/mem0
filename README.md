@@ -4,7 +4,7 @@
 
 > **一句话**：这不是上游 Mem0 的镜像，而是一份**魔改分支**——基于
 > [mem0ai/mem0](https://github.com/mem0ai/mem0)（Apache-2.0）源码，保留上游的 SDK / API /
-> Docker 用法，把分类、衰减、到期日、重排、用量统计和 Dashboard 按「自托管、中文优先、
+> Docker 用法，把分类、衰减、到期日、重排、用量统计和 Web 控制台按「自托管、中文优先、
 > 数据不出内网」的用法重做了一遍。
 
 上游的官方 Mem0 主要服务托管云 / 多租户场景；自己部署一套时，真正需要的东西往往缺一半。
@@ -15,25 +15,27 @@
 
 | 方向 | 上游原版 | 本魔改版 |
 | --- | --- | --- |
-| **分类体系** | 无此概念 | 18 个中文分类 + 判定规则（`server/categories.json`，单一事实来源）；写入时自动打标、改正文触发重打标、检索支持 `categories` 数组过滤；Dashboard 提供分类浏览 / 管理 / 测试，支持单条与批量改分类 |
+| **分类体系** | 无此概念 | 18 个中文分类 + 判定规则（`server/categories.json`，单一事实来源）；写入时自动打标、改正文触发重打标、检索支持 `categories` 数组过滤；控制台提供分类浏览 / 管理 / 测试，支持单条与批量改分类 |
 | **记忆衰减** | 无（SDK 里不支持） | 原生搜索期衰减：0.3x–1.5x 重近因、14 天半衰期、重排后截断、异步写回访问记录；默认关闭，配置页一键开 |
 | **到期日** | 字段存在但界面不可见 | 默认到期日（新记忆自动继承「创建日 + N 天」）+ 列表 / 详情可见可改 + 批量设置 |
 | **重排** | 只有 LLM 打分式 | 通用第三方云重排 `CloudReranker`（`/v1/rerank` 协议：SiliconFlow、Jina、DashScope…），失败自动回退原顺序 |
 | **LLM** | OpenAI 兼容端点 | 新增 opencode provider（自动注入中转要求的请求头）；配置页可填 Base URL / temperature / max_tokens，支持模型连通性测试 |
 | **用量** | 无 | 抽取 / 嵌入 / 重排三模型真实 token 采集、缓存命中统计，按天 / 月 / 用户 / 操作聚合的用量页 |
-| **Dashboard** | 英文、带官方云功能入口 | 全中文；记忆地图（分类分布 + 共现连线按强度配色）、语义搜索、详情直接编辑、按用户下拉筛选、批量操作；去掉云导流与销售外链 |
+| **Web 控制台** | 英文、带官方云功能入口 | 全新独立实现 `server/console`（Vite + React + TS，替换官方 dashboard）：全中文、记忆地图（分类分布 + 共现力导向图）、语义搜索、详情直接编辑、批量操作、分类管理、用量、配置、用户与记忆作用域隔离；同源 nginx 反代 + httpOnly cookie 会话，去掉了云导流与销售外链 |
+| **多用户** | 单管理员 | 管理员可创建 admin / user 账号；普通用户只能访问 `memory_scope` 对应 `user_id` 的记忆（服务端强制，fail closed） |
 | **遥测** | 默认开启 | 默认关闭（`.env` 显式写 `MEM0_TELEMETRY=true` 才开） |
 | **镜像** | 从 PyPI 装 `mem0ai` | 镜像内置本仓库的 mem0 包，支持第三方 LLM / 嵌入 / 重排端点 |
 | **Agent 集成** | 无 | Hermes Agent 记忆插件：每轮自动召回 / 自动捕获、按分类过滤、分级 TTL |
-| **部署** | 开发用 compose | GitHub Actions 构建双镜像（server + dashboard）；`deploy/` 提供 NAS 可直接跑的编排 |
+| **部署** | 开发用 compose | GitHub Actions 构建 server / dashboard 双镜像；`deploy/` 提供 NAS 可直接跑的编排，控制台镜像由 `server/console/Dockerfile` 在 compose 内构建（同源反代，无需 CORS） |
 
 ## 魔改规模
 
 截至 2026-11-14（已合并到上游 `f1791daa`，两侧版本均为 Python SDK 2.2.1 / TS SDK 3.3.1）：
 
-- **58 个自有提交**，105 个文件，**+12,097 / −1,072 行**（相对 `upstream/main`）
-- 大头在服务端：`server/` 65 个文件 +7,037 行（其中 Dashboard 47 个文件 +5,200 行、
-  `server/main.py` +626 行、`usage_hooks.py` +346 行）
+- **58 个自有提交**，105 个文件，**+12,097 / −1,072 行**（相对 `upstream/main`；未计新增控制台）
+- 大头在服务端：`server/` 65 个文件 +7,037 行；新增独立控制台 `server/console/` 52 个文件
+  +8,443 行（记忆模块 13 个文件，管理面 17 个文件，会话/UI 基建与测试 22 个文件）；`server/main.py`
+  +830 行、`usage_hooks.py` +346 行
 - 核心 SDK 只动 12 个文件 +1,227 行（衰减 / 分类 / 重排 / provider），测试新增 6 个文件 +1,794 行，
   `integrations/` 9 个文件 +1,154 行
 
@@ -47,7 +49,7 @@
 
 ## 快速开始
 
-### 1. 自托管栈（server + dashboard + postgres）
+### 1. 自托管栈（server + console + postgres）
 
 一条命令起栈、建管理员、签发首个 API Key：
 
@@ -60,12 +62,14 @@ make bootstrap
 或者手动起栈，再用浏览器向导完成初始化：
 
 ```bash
-cd server && docker compose up -d     # dashboard: http://localhost:3000
+cd server && docker compose up -d     # 控制台: http://localhost:3000
 ```
 
 [`deploy/docker-compose.yaml`](./deploy/docker-compose.yaml) 是同一套栈的生产编排：直接用
-`ghcr.io/hh127/mem0-server:main` 镜像，`mem0-server` / `mem0-dashboard` / `mem0-postgres`
-三件套，数据卷持久化（API 6688，Dashboard 3000），适合直接跑在 NAS / 服务器上。
+`ghcr.io/hh127/mem0-server:main` 镜像，`mem0-server` / `mem0-console` / `mem0-postgres`
+三件套，数据卷持久化（API 6688，控制台 3000）。控制台镜像由
+[`server/console/`](./server/console/README.md) 在 compose 内构建（`docker compose up -d --build`），
+同源反代 `/api/*`，适合直接跑在 NAS / 服务器上。
 
 ### 2. 接上 Hermes Agent
 
@@ -102,7 +106,7 @@ pip install "git+https://github.com/hh127/mem0.git"
 ```
 
 服务端 OpenAPI 文档在 `http://<host>:<映射端口>/docs`（`server/` 编排映射 8888，
-`deploy/` 编排映射 6688；Dashboard 两者都是 3000）。SDK 通用用法、LLM / 嵌入配置仍以
+`deploy/` 编排映射 6688；控制台两者都是 3000）。SDK 通用用法、LLM / 嵌入配置仍以
 上游文档 [docs.mem0.ai](https://docs.mem0.ai) 为准。
 
 ## 分类体系
@@ -122,7 +126,7 @@ pip install "git+https://github.com/hh127/mem0.git"
 * **检索过滤**：`filters={"categories": {"in": ["工作项目"]}}`（数组成员语义，需要支持数组
   感知过滤的 pgvector 实现，本分支已内置）。
 * **修改重打标**：`PUT /memories/{id}` 改正文会重新触发分类判定。
-* **自定义**：改 `server/categories.json` 后重启 `mem0-server` 即可；Dashboard 提供分类浏览 /
+* **自定义**：改 `server/categories.json` 后重启 `mem0-server` 即可；控制台提供分类浏览 /
   管理 / 测试页。
 
 ## 仓库结构
@@ -130,7 +134,8 @@ pip install "git+https://github.com/hh127/mem0.git"
 ```
 mem0/              核心 SDK（分类、衰减、重排等魔改在这里）
 server/            自托管 FastAPI 服务（分类目录 categories.json 在此）
-server/dashboard/  Next.js 中文控制台
+server/console/    全新独立 Web 控制台（Vite + React + TS，替换官方 dashboard）
+server/dashboard/  上游自带 Next.js 面板（旧版，保留以兼容，compose 已改用 console）
 integrations/      编辑器 / Agent 集成，含 hermes-plugin-mem0
 deploy/            生产用 compose 编排（hh127 镜像，NAS 可直接跑）
 scripts/           回归与演示脚本（run_full_tests.sh、decay_demo.py）
@@ -146,17 +151,20 @@ make test-full     # 全量回归（遥测感知分段跑，避免 posthog 撑�
 
 CI：`.github/workflows/fork-tests.yml` 跑全量 `pytest tests/` 与 Dashboard typecheck（可选 provider
 用例按设计 skip）；`.github/workflows/docker-build.yml` 负责 server / dashboard 双镜像构建。
+控制台的 typecheck / build / vitest 与镜像构建尚未接入 CI（workflow 需维护者确认后再改），
+本地检查命令：`cd server/console && pnpm typecheck && pnpm test && pnpm build`。
 
 ## 与上游同步
 
 * `origin` → `github.com/hh127/mem0`（本分支），`upstream` → `github.com/mem0ai/mem0`。
 * **当前状态**：2026-11-14 已合并到上游 `f1791daa`，落后 0 个提交；之后建议每季度同步一次。
 * 上游改动按需 `git fetch upstream && git merge upstream/main`；上游的安全修复建议及时合并。
-* 本分支提交集中在 `server/`、`server/dashboard/`、`mem0/memory/`、
+* 本分支提交集中在 `server/`、`server/console/`、`server/dashboard/`、`mem0/memory/`、
   `integrations/hermes-plugin-mem0/`，与上游重叠面小，冲突成本低。
 * **合并检查清单**（长期只有 4 个文件会冲突）：`README.md`、`mem0/memory/main.py`、
   `mem0/vector_stores/pgvector.py`、`tests/vector_stores/test_pgvector.py`。合并后跑
-  `pytest tests/ -q` 与 `cd server/dashboard && pnpm typecheck` 即可。
+  `pytest tests/ -q`、`cd server/dashboard && pnpm typecheck` 与
+  `cd server/console && pnpm typecheck && pnpm test`。
 * 魔改全部落在源码里，没有 patch 脚本 —— 升级镜像后行为不变。
 
 ## 许可与出处

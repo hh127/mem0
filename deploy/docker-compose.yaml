@@ -47,20 +47,25 @@ services:
     networks:
       - mem0
 
-  mem0-dashboard:
-    image: ghcr.io/hh127/mem0-dashboard:main
-    container_name: mem0-dashboard
+  # 全新独立控制台（替换官方 dashboard）。同源反代 /api/*，登录态用 httpOnly cookie，
+  # 因此不再需要 NAS_IP / NEXT_PUBLIC_API_URL，也不依赖 CORS。
+  # 首次部署在本目录执行 `docker compose build mem0-console` 从仓库内构建；
+  # 发布镜像后可以直接 `docker compose pull mem0-console`。
+  mem0-console:
+    image: ghcr.io/hh127/mem0-console:main
+    build:
+      context: ../server/console
+      args:
+        VITE_INSTANCE_NAME: Mem0
+    container_name: mem0-console
     restart: unless-stopped
     environment:
-      # 必须是浏览器能访问到的地址（NAS_IP 填 NAS 的局域网 IP）
-      - NEXT_PUBLIC_API_URL=http://${NAS_IP:-127.0.0.1}:6688
-      - API_INTERNAL_URL=http://mem0-server:8000
-      - NEXT_PUBLIC_INSTANCE_NAME=Mem0
+      - API_UPSTREAM=http://mem0-server:8000
     depends_on:
       mem0-server:
         condition: service_started
     ports:
-      - "3000:3000"
+      - "3000:80"
     networks:
       - mem0
 
