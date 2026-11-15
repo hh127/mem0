@@ -85,3 +85,43 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           no-cache: true
+
+  # The console replaced the official dashboard in the deployment (see
+  # server/console/README.md). It is built here so the self-hosted NAS pulls the
+  # same image from GHCR instead of building locally.
+  build-console:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.PAT_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-console
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: server/console
+          file: server/console/Dockerfile
+          # amd64 only: the self-hosted deployment target is x86_64. Add arm64 here
+          # (and setup-qemu-action above) if an arm64 host ever needs this image.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: true
