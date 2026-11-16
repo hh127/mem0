@@ -2,7 +2,7 @@
  * 记忆模块的展示辅助函数（纯函数，不依赖 React）。
  */
 import { formatDate, formatDateTime, formatRelative } from "@/lib/utils";
-import type { Memory } from "./types";
+import type { Memory, MemoryKind, ReviewStatus } from "./types";
 
 /** 新建记忆时记住最近一次使用的 user_id，下次打开表单直接带出来。 */
 export const LAST_USER_STORAGE_KEY = "mem0_console_last_memory_user_id";
@@ -84,10 +84,82 @@ export function categoriesOf(memory: Pick<Memory, "categories">): string[] {
   return out;
 }
 
+export const REVIEW_STATUS_LABELS: Record<ReviewStatus, string> = {
+  pending: "待审核",
+  approved: "已通过",
+  rejected: "已驳回",
+};
+
+export const REVIEW_STATUS_TONES: Record<ReviewStatus, "warn" | "ok" | "danger"> = {
+  pending: "warn",
+  approved: "ok",
+  rejected: "danger",
+};
+
+export const MEMORY_KIND_LABELS: Record<MemoryKind, string> = {
+  temporary: "临时记忆",
+  permanent: "永久记忆",
+};
+
+/** 审核状态：metadata 里没有 `review_status`（含历史记忆）= 待审核。 */
+export function reviewStatusOf(memory: Pick<Memory, "metadata">): ReviewStatus {
+  const value = memory.metadata?.review_status;
+  if (value === "approved" || value === "rejected") return value;
+  return "pending";
+}
+
+/** 有到期日 = 临时记忆；没有 = 永久记忆。 */
+export function memoryKindOf(memory: Pick<Memory, "expiration_date">): MemoryKind {
+  return memory.expiration_date ? "temporary" : "permanent";
+}
+
+export interface ReviewInfo {
+  status: ReviewStatus;
+  label: string;
+  tone: "warn" | "ok" | "danger";
+  kind: MemoryKind;
+  kindLabel: string;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  note: string | null;
+}
+
+function optionalText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+export function reviewInfo(memory: Memory): ReviewInfo {
+  const status = reviewStatusOf(memory);
+  const metadata = memory.metadata ?? {};
+  return {
+    status,
+    label: REVIEW_STATUS_LABELS[status],
+    tone: REVIEW_STATUS_TONES[status],
+    kind: memoryKindOf(memory),
+    kindLabel: MEMORY_KIND_LABELS[memoryKindOf(memory)],
+    reviewedBy: optionalText(metadata.reviewed_by),
+    reviewedAt: optionalText(metadata.reviewed_at),
+    note: optionalText(metadata.review_note),
+  };
+}
+
+/** 记忆库的审核状态视图：`visible` = 待审核 + 已通过（默认把已驳回藏起来）。 */
+export type ReviewView = "visible" | ReviewStatus;
+
+export function matchesReviewView(memory: Pick<Memory, "metadata">, view: ReviewView): boolean {
+  const status = reviewStatusOf(memory);
+  return view === "visible" ? status !== "rejected" : status === view;
+}
+
+/** 审核字段已在卡片/详情里有专门的展示，元数据列表里不再重复。 */
+const REVIEW_METADATA_KEYS = new Set(["review_status", "reviewed_by", "reviewed_at", "review_note"]);
+
 /** metadata 展开成可读的 key/value 列表；嵌套值转成 JSON 字符串。 */
 export function metadataEntries(metadata: Record<string, unknown> | null | undefined): [string, string][] {
   if (!metadata) return [];
-  return Object.entries(metadata).map(([key, value]) => {
+  return Object.entries(metadata)
+    .filter(([key]) => !REVIEW_METADATA_KEYS.has(key))
+    .map(([key, value]) => {
     if (value === null || value === undefined) return [key, "—"];
     if (typeof value === "string") return [key, value];
     if (typeof value === "number" || typeof value === "boolean") return [key, String(value)];

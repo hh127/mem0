@@ -232,3 +232,20 @@ export async function updateMemory(id: string, patch: MemoryPatch): Promise<Memo
 export async function deleteMemory(id: string): Promise<MemoryWriteResponse> {
   return api.delete<MemoryWriteResponse>(`/memories/${encodeURIComponent(id)}`);
 }
+
+export type ReviewAction = "approve" | "reject";
+
+/**
+ * 记录人工审核结论（管理员）。审核状态写在记忆 metadata 里，
+ * 未审核的记忆没有 `review_status` 字段，因此列表不需要额外的状态字段。
+ */
+export async function reviewMemory(
+  id: string,
+  action: ReviewAction,
+  note?: string,
+): Promise<MemoryWriteResponse> {
+  return api.post<MemoryWriteResponse>(`/memories/${encodeURIComponent(id)}/review`, {
+    action,
+    note: note?.trim() || undefined,
+  });
+}

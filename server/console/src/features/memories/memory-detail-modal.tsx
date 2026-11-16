@@ -19,7 +19,7 @@ import {
   memoryKeys,
   updateMemory,
 } from "./memory-api";
-import { categoriesOf, expiryInfo, historyEventLabel, metadataEntries } from "./memory-utils";
+import { categoriesOf, expiryInfo, historyEventLabel, metadataEntries, reviewInfo } from "./memory-utils";
 import type { Memory } from "./types";
 
 export function MemoryDetailModal({
@@ -157,6 +157,7 @@ export function MemoryDetailModal({
           ? "outline"
           : "neutral";
   const metadata = metadataEntries(detail?.metadata);
+  const review = detail ? reviewInfo(detail) : null;
   const categoriesDirty = categoryDraft !== null;
 
   const addCategory = (name: string) => {
@@ -406,6 +407,38 @@ export function MemoryDetailModal({
             <p className="text-[11px] text-ink-faint">
               到期后记忆会从默认列表与搜索中隐藏，数据仍在库中；清空日期即可恢复。
             </p>
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-xs font-medium uppercase tracking-[0.14em] text-ink-faint">审核状态</h3>
+            {review ? (
+              <>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge tone={review.tone}>{review.label}</Badge>
+                  <Badge tone="outline">{review.kindLabel}</Badge>
+                  {review.reviewedBy ? (
+                    <span className="text-[11px] text-ink-faint">
+                      {review.reviewedBy} · {formatDateTime(review.reviewedAt)}
+                    </span>
+                  ) : null}
+                </div>
+                {review.status === "pending" ? (
+                  <p className="text-[11px] text-ink-faint">
+                    尚未人工审核。管理员可以在「记忆审核」页通过或驳回；未审核的记忆仍可被 AI 检索。
+                  </p>
+                ) : null}
+                {review.status === "rejected" ? (
+                  <p className="text-[11px] text-danger">
+                    已驳回的记忆不会出现在记忆库默认列表和语义检索中，但数据仍保留在库里，可恢复或彻底删除。
+                  </p>
+                ) : null}
+                {review.note ? (
+                  <p className="rounded-md border border-line bg-panel-2/50 px-2.5 py-1.5 text-[11px] leading-5 text-ink-soft">
+                    审核备注：{review.note}
+                  </p>
+                ) : null}
+              </>
+            ) : null}
           </section>
 
           <section className="space-y-2">

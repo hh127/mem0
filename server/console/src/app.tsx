@@ -12,6 +12,7 @@ import { LoginPage } from "@/features/auth/login-page";
 import { SetupPage } from "@/features/auth/setup-page";
 import { NotFoundPage } from "@/features/misc/not-found-page";
 import { MemoriesPage } from "@/features/memories/memories-page";
+import { ReviewPage } from "@/features/review/review-page";
 import { MapPage } from "@/features/map/map-page";
 import { CategoriesPage } from "@/features/categories/categories-page";
 import { CategoryManagePage } from "@/features/categories/manage-page";
@@ -89,6 +90,7 @@ const router = createBrowserRouter([
             children: [
               { path: "/", element: <Navigate to="/memories" replace /> },
               { path: "/memories", element: <MemoriesPage /> },
+              { path: "/review", element: admin(<ReviewPage />) },
               { path: "/map", element: <MapPage /> },
               { path: "/categories", element: admin(<CategoriesPage />) },
               { path: "/categories/manage", element: admin(<CategoryManagePage />) },

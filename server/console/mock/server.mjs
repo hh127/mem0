@@ -245,6 +245,37 @@ const USER_IDS = ["hermes-user-1", "hermes-user-2", "hermes-user-3"];
 const AGENT_IDS = ["openclaw-main", "hermes-agent"];
 const RUN_IDS = ["run-2026-11-a", "run-2026-11-b", "run-2026-10-c"];
 
+// ---------------------------------------------------------------- review helpers
+// Mirrors server/review.py: review fields live in the memory metadata, and a memory
+// without review_status is pending.
+const REVIEW_METADATA_KEYS = ["review_status", "reviewed_by", "reviewed_at", "review_note"];
+
+function stripReviewMetadata(metadata) {
+  if (!metadata || typeof metadata !== "object") return metadata;
+  const clean = { ...metadata };
+  for (const key of REVIEW_METADATA_KEYS) delete clean[key];
+  return clean;
+}
+
+/** Demo distribution: 25% pending, 50% approved, 25% rejected. */
+function reviewFields(index) {
+  if (index % 4 === 0) return {};
+  if (index % 4 === 3) {
+    return {
+      review_status: "rejected",
+      reviewed_by: "admin@example.com",
+      reviewed_at: daysAgo(2),
+      review_note: "内容太琐碎，暂不保留。",
+    };
+  }
+  return {
+    review_status: "approved",
+    reviewed_by: "admin@example.com",
+    reviewed_at: daysAgo(1),
+    review_note: null,
+  };
+}
+
 function seedMemories() {
   const rows = [];
   const count = EMPTY ? 0 : 40;
@@ -269,6 +300,7 @@ function seedMemories() {
       metadata: {
         source: index % 2 === 0 ? "openclaw" : "mem0-sdk",
         confidence: Number((0.6 + (index % 4) * 0.1).toFixed(2)),
+        ...reviewFields(index),
       },
       created_at: createdAt,
       updated_at: daysAgo(index % 20),
@@ -472,6 +504,8 @@ function classify(text) {
 function searchMemories(query, filters) {
   const normalized = String(query || "").toLowerCase();
   const scoped = DB.memories.filter((row) => {
+    // 已驳回 = 软删除：控制台可见，但检索不召回。
+    if (row.metadata?.review_status === "rejected") return false;
     if (!filters) return true;
     if (filters.user_id && row.user_id !== filters.user_id) return false;
     if (filters.agent_id && row.agent_id !== filters.agent_id) return false;
@@ -721,7 +755,7 @@ const server = createServer(async (req, res) => {
                   .slice(0, 10)
               : null),
           categories: body.categories || [category],
-          metadata: body.metadata || {},
+          metadata: stripReviewMetadata(body.metadata) || {},
           created_at: now(),
           updated_at: now(),
           _history: [],
@@ -765,7 +799,7 @@ const server = createServer(async (req, res) => {
           row.expiration_date = body.expiration_date || null;
         }
         if (body.metadata && typeof body.metadata === "object") {
-          row.metadata = { ...row.metadata, ...body.metadata };
+          row.metadata = { ...row.metadata, ...stripReviewMetadata(body.metadata) };
         }
         row.updated_at = now();
         row._history.push({
@@ -785,6 +819,39 @@ const server = createServer(async (req, res) => {
         }
         DB.memories = DB.memories.filter((item) => item.id !== row.id);
         return send(res, 200, { message: "Memory deleted successfully" });
+      }
+
+      if (segments.length === 3 && segments[2] === "review" && method === "POST") {
+        const admin = requireAdmin(req, res);
+        if (!admin) return;
+        const row = DB.memories.find((item) => item.id === segments[1]);
+        if (!row) return bad(res, 404, "Memory not found.");
+        const body = await readJson(req);
+        if (body.action !== "approve" && body.action !== "reject") {
+          return bad(res, 400, "action must be 'approve' or 'reject'.");
+        }
+        const note = typeof body.note === "string" ? body.note.trim() : "";
+        if (note.length > 500) {
+          return bad(res, 422, "note 最多 500 字。");
+        }
+        row.metadata = {
+          ...(row.metadata || {}),
+          review_status: body.action === "approve" ? "approved" : "rejected",
+          reviewed_by: admin.email,
+          reviewed_at: now(),
+          review_note: note || null,
+        };
+        row.updated_at = now();
+        row._history.push({
+          id: uid(),
+          event: "UPDATE",
+          old_memory: row.memory,
+          new_memory: row.memory,
+          created_at: row.updated_at,
+        });
+        return send(res, 200, {
+          message: body.action === "approve" ? "Memory approved." : "Memory rejected.",
+        });
       }
 
       if (

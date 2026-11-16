@@ -26,6 +26,12 @@ export interface Memory {
 
 export type EntityType = "user" | "agent" | "run";
 
+/** 人工审核状态。metadata 里没有 `review_status` 就是待审核。 */
+export type ReviewStatus = "pending" | "approved" | "rejected";
+
+/** 临时记忆（有到期日）/ 永久记忆（无到期日）。 */
+export type MemoryKind = "temporary" | "permanent";
+
 /** `GET /entities` 的一行；同一个 id 可能在不同 type 下各出现一次。 */
 export interface MemoryEntity {
   id: string;

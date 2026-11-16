@@ -9,7 +9,7 @@ import { Bot, CalendarClock, ChevronDown, ChevronUp, Play, Tag, User } from "luc
 import { cn, formatDateTime } from "@/lib/utils";
 import { Badge, Button, Checkbox } from "@/ui/primitives";
 import type { Memory } from "./types";
-import { categoriesOf, expiryInfo, metadataEntries, timeSummary } from "./memory-utils";
+import { categoriesOf, expiryInfo, metadataEntries, reviewInfo, timeSummary } from "./memory-utils";
 
 const LONG_TEXT_THRESHOLD = 170;
 
@@ -25,6 +25,7 @@ export function MemoryCard({ memory, selectMode, selected, onToggleSelect, onOpe
   const [expanded, setExpanded] = useState(false);
   const categories = categoriesOf(memory);
   const expiry = expiryInfo(memory.expiration_date);
+  const review = reviewInfo(memory);
   const metadata = metadataEntries(memory.metadata);
   const times = timeSummary(memory);
   const isLong = memory.memory.length > LONG_TEXT_THRESHOLD || memory.memory.split("\n").length > 4;
@@ -118,6 +119,8 @@ export function MemoryCard({ memory, selectMode, selected, onToggleSelect, onOpe
           创建于 {times.created}
         </span>
         <Badge tone={expiryTone}>{expiry.label}</Badge>
+        <Badge tone="outline">{review.kindLabel}</Badge>
+        <Badge tone={review.tone}>{review.label}</Badge>
       </div>
 
       {metadata.length > 0 ? (

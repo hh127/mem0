@@ -79,7 +79,7 @@ export function CreateMemoryModal({
       open={open}
       onClose={onClose}
       title="新建记忆"
-      description="提交一段对话内容，服务端会抽取记忆并按分类目录自动打标。"
+      description="提交一段对话内容，服务端会抽取记忆并按分类目录自动打标；新记忆会进入待审核队列，管理员通过后才会归档到记忆库。"
       size="md"
       footer={
         <>

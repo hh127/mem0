@@ -40,6 +40,14 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from models import RequestLog, User
 from pydantic import BaseModel, Field
 from rate_limit import limiter
+from review import (
+    APPROVE_ACTION,
+    REJECT_ACTION,
+    REJECTED,
+    review_patch,
+    review_status_of,
+    strip_review_metadata,
+)
 from routers import api_keys as api_keys_router
 from routers import auth as auth_router
 from routers import entities as entities_router
@@ -347,6 +355,15 @@ class MemoryUpdate(BaseModel):
             "Replace the memory's category tags with this list (trimmed, de-duplicated). "
             "Pass [] to clear all tags. Omit the field to leave tags untouched."
         ),
+    )
+
+
+class MemoryReviewRequest(BaseModel):
+    action: str = Field(..., description="审核动作：'approve'（通过）或 'reject'（驳回）。")
+    note: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="可选审核备注；驳回时作为驳回理由保存在记忆 metadata 里。",
     )
 
 
@@ -883,6 +900,9 @@ def add_memory(memory_create: MemoryCreate, request: Request, _auth=Depends(veri
 
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
     _apply_default_expiry(params)
+    if params.get("metadata"):
+        # 审核结论只能由 /memories/{id}/review 写入，客户端 metadata 不能自带。
+        params["metadata"] = strip_review_metadata(params["metadata"])
     if params.get("custom_categories"):
         # A per-call catalog obeys the same disabled-flag rule as the project one.
         params["custom_categories"] = _enabled_entries(params["custom_categories"])
@@ -1023,7 +1043,12 @@ def search_memories(search_req: SearchRequest, request: Request, _auth=Depends(v
             params["rerank"] = search_req.rerank
         if search_req.show_expired is not None:
             params["show_expired"] = search_req.show_expired
-        return get_memory_instance().search(query=search_req.query, filters=filters, **params)
+        response = get_memory_instance().search(query=search_req.query, filters=filters, **params)
+        # 已驳回的记忆等同软删除：控制台仍可查看/恢复，但 AI 检索不再召回。
+        results = response.get("results") if isinstance(response, dict) else None
+        if isinstance(results, list):
+            response["results"] = [item for item in results if review_status_of(item) != REJECTED]
+        return response
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -1047,7 +1072,7 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, request: Request
         if "text" in fields_set:
             params["data"] = updated_memory.text
         if "metadata" in fields_set:
-            params["metadata"] = updated_memory.metadata
+            params["metadata"] = strip_review_metadata(updated_memory.metadata)
         if "expiration_date" in fields_set:
             params["expiration_date"] = updated_memory.expiration_date
         if "categories" in fields_set:
@@ -1059,6 +1084,33 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, request: Request
         raise _client_error(e)
     except Exception:
         raise upstream_error()
+
+
+@app.post("/memories/{memory_id}/review", summary="Approve or reject a memory", response_model=MessageResponse)
+def review_memory(memory_id: str, body: MemoryReviewRequest, _auth=Depends(require_admin)):
+    """记录一条记忆的人工审核结论（管理员）。
+
+    审核状态写在记忆 metadata 里：没有 ``review_status`` = 待审核，审核后变成
+    ``approved`` / ``rejected``。这里不改正文、不动分类，也不影响嵌入向量。
+    已驳回的记忆仍保留在库中，控制台可查看/恢复/彻底删除，但 ``POST /search`` 不再召回。
+    """
+    try:
+        if body.action not in (APPROVE_ACTION, REJECT_ACTION):
+            raise HTTPException(status_code=400, detail="action must be 'approve' or 'reject'.")
+        memory = get_memory_instance().get(memory_id)
+        if memory is None:
+            raise HTTPException(status_code=404, detail="Memory not found.")
+        patch = review_patch(body.action, getattr(_auth, "email", "") or "", body.note)
+        get_memory_instance().update(memory_id=memory_id, metadata=patch)
+    except HTTPException:
+        raise
+    except (ValueError, Mem0ValidationError) as e:
+        raise _client_error(e)
+    except Exception:
+        raise upstream_error()
+    return MessageResponse(
+        message="Memory approved." if body.action == APPROVE_ACTION else "Memory rejected."
+    )
 
 
 @app.get("/memories/{memory_id}/history", summary="Get memory history")

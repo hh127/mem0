@@ -9,7 +9,7 @@
  * 从记忆地图或其它页面跳转过来时，筛选会直接生效。
  */
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CalendarClock,
@@ -21,6 +21,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  ShieldCheck,
   SquareCheckBig,
   Tags,
   Trash2,
@@ -53,8 +54,22 @@ import {
   searchMemories,
   updateMemory,
 } from "./memory-api";
-import { categoriesOf, localDateString, matchesKeyword } from "./memory-utils";
+import {
+  categoriesOf,
+  localDateString,
+  matchesKeyword,
+  matchesReviewView,
+  reviewStatusOf,
+  type ReviewView,
+} from "./memory-utils";
 import type { Memory, MemoryFilters } from "./types";
+
+const REVIEW_VIEW_OPTIONS: { value: ReviewView; label: string }[] = [
+  { value: "visible", label: "全部（不含驳回）" },
+  { value: "pending", label: "待审核" },
+  { value: "approved", label: "已通过" },
+  { value: "rejected", label: "已驳回" },
+];
 
 const PAGE_SIZE_OPTIONS = [20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
@@ -84,6 +99,7 @@ export function MemoriesPage() {
   const [searchMode, setSearchMode] = useState<"semantic" | "keyword">("semantic");
   const [rerank, setRerank] = useState(true);
   const [showExpired, setShowExpired] = useState(false);
+  const [reviewView, setReviewView] = useState<ReviewView>("visible");
   const [view, setView] = useState<"cards" | "table">("cards");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
@@ -176,7 +192,7 @@ export function MemoriesPage() {
   const keyword = searchMode === "keyword" ? urlQuery : "";
 
   const filteredMemories = useMemo(() => {
-    let rows = baseMemories;
+    let rows = baseMemories.filter((memory) => matchesReviewView(memory, reviewView));
     if (activeCategories.length > 0) {
       rows = rows.filter((memory) => {
         const names = categoriesOf(memory);
@@ -185,7 +201,18 @@ export function MemoriesPage() {
     }
     if (keyword) rows = rows.filter((memory) => matchesKeyword(memory, keyword));
     return rows;
-  }, [baseMemories, activeCategories, keyword]);
+  }, [baseMemories, activeCategories, keyword, reviewView]);
+
+  const reviewTally = useMemo(() => {
+    let pending = 0;
+    let rejected = 0;
+    for (const memory of baseMemories) {
+      const status = reviewStatusOf(memory);
+      if (status === "pending") pending += 1;
+      else if (status === "rejected") rejected += 1;
+    }
+    return { pending, rejected };
+  }, [baseMemories]);
 
   const categoryCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -275,6 +302,7 @@ export function MemoriesPage() {
     setEntityType("");
     setEntityValue("");
     setShowExpired(false);
+    setReviewView("visible");
     updateSearchParams({ q: null, category: null, user_id: null, agent_id: null, run_id: null });
     setPage(1);
   };
@@ -376,7 +404,7 @@ export function MemoriesPage() {
   });
 
   // ------------------------------------------------------------ 渲染
-  const hasActiveFilters = activeCategories.length > 0 || Boolean(entityValue);
+  const hasActiveFilters = activeCategories.length > 0 || Boolean(entityValue) || reviewView !== "visible";
   const entityTypeLabel = entityType ? ENTITY_TYPE_LABELS[entityType] : "实体";
 
   return (
@@ -435,6 +463,25 @@ export function MemoriesPage() {
         </div>
       ) : null}
 
+      {isAdmin && reviewTally.pending > 0 && reviewView !== "pending" ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-warn/40 bg-warn-soft/50 px-3 py-2 text-xs text-ink-soft">
+          <ShieldCheck className="size-3.5 shrink-0 text-warn" />
+          <span>
+            有 {formatNumber(reviewTally.pending)} 条记忆还没人工审核；通过后会归档到记忆库。
+          </span>
+          <Link to="/review" className="font-medium text-accent hover:underline">
+            去审核
+          </Link>
+          <button
+            type="button"
+            className="ml-auto text-ink-faint hover:text-ink"
+            onClick={() => setReviewView("pending")}
+          >
+            只看待审核
+          </button>
+        </div>
+      ) : null}
+
       <Card className="space-y-3 p-3">
         <div className="flex flex-wrap items-center gap-2">
           <Select
@@ -470,6 +517,22 @@ export function MemoriesPage() {
             onChange={setCategories}
             emptyText="分类目录为空"
           />
+
+          <Select
+            aria-label="审核状态"
+            className="h-8 w-40 text-xs"
+            value={reviewView}
+            onChange={(event) => {
+              setReviewView(event.target.value as ReviewView);
+              setPage(1);
+            }}
+          >
+            {REVIEW_VIEW_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
 
           <div className="relative min-w-[12rem] flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-ink-faint" />
@@ -572,9 +635,13 @@ export function MemoriesPage() {
 
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-faint">
           <span>共 {formatNumber(baseMemories.length)} 条</span>
-          {activeCategories.length > 0 || keyword ? (
-            <span>筛选后 {formatNumber(filteredMemories.length)} 条</span>
+          {reviewTally.pending > 0 ? (
+            <span>待审核 {formatNumber(reviewTally.pending)} 条</span>
           ) : null}
+          {reviewTally.rejected > 0 ? (
+            <span>已驳回 {formatNumber(reviewTally.rejected)} 条</span>
+          ) : null}
+          <span>当前视图 {formatNumber(filteredMemories.length)} 条</span>
           {urlQuery ? (
             <span>
               {searchMode === "semantic" ? `语义搜索「${urlQuery}」· 按相关度排序` : `关键词「${urlQuery}」· 本地匹配`}

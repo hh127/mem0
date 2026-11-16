@@ -5,7 +5,7 @@ import { cn, formatDateTime } from "@/lib/utils";
 import { Badge, Button, Checkbox } from "@/ui/primitives";
 import { Table, Tbody, Td, Th, Thead } from "@/ui/table";
 import type { Memory } from "./types";
-import { categoriesOf, expiryInfo, timeSummary } from "./memory-utils";
+import { categoriesOf, expiryInfo, reviewInfo, timeSummary } from "./memory-utils";
 
 function expiryTone(memory: Memory): "danger" | "warn" | "outline" | "neutral" {
   const tone = expiryInfo(memory.expiration_date).tone;
@@ -48,6 +48,7 @@ export function MemoryTable({
           <Th>归属实体</Th>
           <Th>时间</Th>
           <Th>到期日</Th>
+          <Th className="w-24">审核</Th>
           <Th className="w-16">操作</Th>
         </tr>
       </Thead>
@@ -55,6 +56,7 @@ export function MemoryTable({
         {memories.map((memory) => {
           const categories = categoriesOf(memory);
           const expiry = expiryInfo(memory.expiration_date);
+          const review = reviewInfo(memory);
           const times = timeSummary(memory);
           const selected = selectedIds.has(memory.id);
           return (
@@ -119,6 +121,12 @@ export function MemoryTable({
               </Td>
               <Td>
                 <Badge tone={expiryTone(memory)}>{expiry.label}</Badge>
+              </Td>
+              <Td>
+                <div className="space-y-1">
+                  <Badge tone={review.tone}>{review.label}</Badge>
+                  <p className="text-[11px] text-ink-faint">{review.kindLabel}</p>
+                </div>
               </Td>
               <Td>
                 <Button

@@ -10,6 +10,7 @@ import {
   Moon,
   Network,
   Settings,
+  ShieldCheck,
   Sun,
   Tag,
   UserCog,
@@ -34,6 +35,7 @@ const MEMORY_NAV: NavItem[] = [
 ];
 
 const ADMIN_NAV: NavItem[] = [
+  { to: "/review", label: "记忆审核", icon: ShieldCheck },
   { to: "/categories", label: "分类", icon: Tag },
   { to: "/requests", label: "请求日志", icon: Activity },
   { to: "/usage", label: "用量", icon: Gauge },

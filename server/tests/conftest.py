@@ -155,16 +155,37 @@ class FakeMemory:
         return memory_id
 
     def _serialize(self, row: FakeRow) -> dict:
+        """Mirror what ``mem0.Memory.get/get_all/search`` return.
+
+        Entity identifiers and the other promoted fields stay at the top level; every other
+        payload key (including review fields) is nested under ``metadata``. Keeping the fake
+        faithful here matters for code that inspects metadata, e.g. memory review.
+        """
         payload = row.payload
-        return {
+        promoted = (
+            "user_id",
+            "agent_id",
+            "run_id",
+            "actor_id",
+            "role",
+            "attributed_to",
+            "expiration_date",
+            "categories",
+        )
+        item = {
             "id": row.id,
             "memory": payload.get("data"),
-            "user_id": payload.get("user_id"),
-            "agent_id": payload.get("agent_id"),
-            "run_id": payload.get("run_id"),
             "created_at": payload.get("created_at"),
             "updated_at": payload.get("updated_at"),
         }
+        for key in promoted:
+            if key in payload:
+                item[key] = payload[key]
+        reserved = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", *promoted}
+        extra = {key: value for key, value in payload.items() if key not in reserved}
+        if extra:
+            item["metadata"] = extra
+        return item
 
     def _filtered(self, filters):
         rows = list(self.rows.values())

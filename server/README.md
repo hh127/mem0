@@ -215,7 +215,9 @@ make prune-logs REQUEST_LOG_RETENTION_DAYS=7  # 缩短窗口
 
 - **请求（Requests）** —— API 调用的实时审计日志（方法、路径、状态、耗时）。
 - **记忆（Memories）** —— 卡片/列表浏览记忆；语义搜索（可开「使用重排」）；就地修改正文与分类；
-  按用户下拉筛选（选项来自 `/entities`）。
+  按用户下拉筛选（选项来自 `/entities`）；按审核状态筛选，并提示待审核条数。
+- **记忆审核（Review）** —— 管理员逐条通过/驳回记忆，可按临时/永久记忆与分类筛选，
+  见下方[记忆审核](#记忆审核)。
 - **分类（Categories）** —— 浏览、管理（启用/停用）、测试 `server/categories.json` 里的分类体系，
   见下方[分类](#分类)。
 - **记忆地图** —— 分类分布 + 共现关系图，连线按共现强度分档配色。
@@ -233,6 +235,32 @@ make prune-logs REQUEST_LOG_RETENTION_DAYS=7  # 缩短窗口
 18 个分类 + `decision_rules` 判定规则。写入时自动打标；修改记忆正文会重新判定分类；检索支持
 `filters={"categories": {"in": [...]}}`（数组成员语义，依赖本分支内置的 pgvector 数组感知过滤）。
 分类名一律原样返回 —— 不翻译、不改写。改完 JSON 重启 `mem0-server` 即生效。
+
+## 记忆审核
+
+新写入的记忆默认是「待审核」：payload 里没有 `review_status` 字段就代表待审核，所以历史记忆
+也会进入队列。管理员在控制台「记忆审核」页按**临时记忆（有到期日）/ 永久记忆（无到期日）**和
+**分类**逐条通过或驳回，审核结论直接写进记忆的 metadata，不新增表：
+
+| 字段 | 含义 |
+| --- | --- |
+| `review_status` | `approved` 已通过 / `rejected` 已驳回；缺省 = 待审核 |
+| `reviewed_by` | 审核人邮箱 |
+| `reviewed_at` | 审核时间（ISO 8601） |
+| `review_note` | 审核备注（驳回理由）；再次通过时清空 |
+
+接口：
+
+- `POST /memories/{memory_id}/review`，请求体 `{"action": "approve" | "reject", "note": "可选"}`，
+  仅管理员。action 非法返回 400，记忆不存在返回 404，`note` 超过 500 字返回 422。
+- 已通过的记忆不再出现在审核列表，可在记忆库按「已通过」筛选查看；已驳回的记忆从记忆库默认列表和
+  `POST /search` 中隐藏，但数据仍保留，可在控制台恢复或彻底删除（`DELETE /memories/{id}`）。
+- 审核页支持就地编辑正文、分类与到期日（保存后仍留在队列，可再点「保存并通过」），
+  也可以直接「删除」跳过驳回、彻底移除这条记忆。
+- 客户端写入（`POST /memories`、`PUT /memories/{id}`）时附加 `review_status` / `reviewed_by` /
+  `reviewed_at` / `review_note` 会被服务端剥掉，审核结论只能由审核接口写。
+
+审核是**后台管理动作**：待审核的记忆仍会被语义检索召回；只有「已驳回」不参与召回。
 
 ## 遥测
 
@@ -385,3 +413,4 @@ postgres:
 ## 参考
 
 更多产品与 API 文档见 [docs.mem0.ai](https://docs.mem0.ai/open-source/overview)。
+本 fork 的测试流程（控制台 / 服务端 / SDK / CI 现状）见 [`../TESTING.md`](../TESTING.md)。
