@@ -241,6 +241,17 @@ const MEMORY_TEXTS = [
   ["AI助手设置", "让助手回复时使用简体中文，不要用表情符号。"],
 ];
 
+/** 演示用：部分记忆会额外带上一个相关的第二分类，让共现关系非空。 */
+const CATEGORY_AFFINITY = {
+  技术能力: "开发项目",
+  开发项目: "技术能力",
+  工作信息: "工作项目",
+  工作项目: "工作信息",
+  设备环境: "软件与服务",
+  软件与服务: "网络与基础设施",
+  专业知识: "工作信息",
+};
+
 const USER_IDS = ["hermes-user-1", "hermes-user-2", "hermes-user-3"];
 const AGENT_IDS = ["openclaw-main", "hermes-agent"];
 const RUN_IDS = ["run-2026-11-a", "run-2026-11-b", "run-2026-10-c"];
@@ -283,6 +294,17 @@ function seedMemories() {
     const [category, text] = MEMORY_TEXTS[index % MEMORY_TEXTS.length];
     const createdAt = daysAgo((index % 28) + 1);
     const userId = USER_IDS[index % USER_IDS.length];
+    const categories = index % 9 === 0 ? [] : [category];
+    const affinity = CATEGORY_AFFINITY[category];
+    if (
+      index % 9 !== 0 &&
+      index % 3 === 0 &&
+      affinity &&
+      affinity !== category &&
+      !categories.includes(affinity)
+    ) {
+      categories.push(affinity);
+    }
     rows.push({
       id: uid(),
       memory: text,
@@ -296,7 +318,7 @@ function seedMemories() {
               .toISOString()
               .slice(0, 10)
           : null,
-      categories: index % 9 === 0 ? [] : [category],
+      categories,
       metadata: {
         source: index % 2 === 0 ? "openclaw" : "mem0-sdk",
         confidence: Number((0.6 + (index % 4) * 0.1).toFixed(2)),
@@ -313,6 +335,93 @@ function seedMemories() {
           created_at: createdAt,
         },
       ],
+    });
+  }
+  if (!EMPTY) {
+    // 追加 6 条历史记忆，覆盖 30/90 天之外的时间维度，并作为单分类孤岛来源。
+    const ARCHIVE_MEMORIES = [
+      ["技术能力", "去年用 Python 写过清单校验脚本，现在还在跑。", 120],
+      ["开发项目", "SmartQuant 的第一版原型是去年冬天搭的。", 98],
+      ["工作信息", "去年团队做过一次成本管理流程梳理。", 75],
+      ["专业知识", "去年底系统学过一遍新版清单计价规范。", 62],
+      ["行为习惯", "过去的习惯是每月月末核对一次台账。", 45],
+      ["个人信息", "刚入行那几年在施工单位做现场资料。", 110],
+    ];
+    ARCHIVE_MEMORIES.forEach(([category, text, ageDays], index) => {
+      const slot = 40 + index;
+      rows.push({
+        id: uid(),
+        memory: text,
+        user_id: USER_IDS[slot % USER_IDS.length],
+        agent_id: slot % 3 === 0 ? AGENT_IDS[slot % AGENT_IDS.length] : null,
+        run_id: slot % 4 === 0 ? RUN_IDS[slot % RUN_IDS.length] : null,
+        hash: `hash-archive-${index}`,
+        expiration_date: null,
+        categories: [category],
+        metadata: {
+          source: index % 2 === 0 ? "openclaw" : "mem0-sdk",
+          confidence: 0.8,
+          review_status: "approved",
+          reviewed_by: "admin@example.com",
+          reviewed_at: daysAgo(3),
+        },
+        created_at: daysAgo(ageDays),
+        updated_at: daysAgo(ageDays),
+        _history: [
+          {
+            id: uid(),
+            event: "ADD",
+            old_memory: null,
+            new_memory: text,
+            created_at: daysAgo(ageDays),
+          },
+        ],
+      });
+    });
+  }
+  if (!EMPTY) {
+    // 追加 9 条共现样例：均为双分类且审核通过，让地图连线有稳定的粗细差异。
+    const COOCCURRENCE_MEMORIES = [
+      ["工作信息", "工作项目", "成本复核流程每个季度跟项目结算同步走一遍。", 5],
+      ["工作信息", "工作项目", "项目周报里要同时体现合同节点与成本偏差。", 12],
+      ["工作信息", "工作项目", "结算资料由项目部和成本中心一起签字确认。", 22],
+      ["技术能力", "开发项目", "用 TypeScript 重写了清单解析的入口脚本。", 8],
+      ["技术能力", "开发项目", "Docker 化之后本地和服务器环境终于一致了。", 18],
+      ["设备环境", "软件与服务", "NAS 上的容器每天凌晨自动备份到第二块盘。", 9],
+      ["设备环境", "软件与服务", "UPS 断电后会自动通知所有自托管服务下线。", 26],
+      ["软件与服务", "网络与基础设施", "反向代理统一在 Nginx Proxy Manager 里管理证书。", 15],
+      ["专业知识", "工作信息", "目标成本与实际成本的偏差要按月归集。", 40],
+    ];
+    COOCCURRENCE_MEMORIES.forEach(([first, second, text, ageDays], index) => {
+      const slot = 55 + index;
+      rows.push({
+        id: uid(),
+        memory: text,
+        user_id: USER_IDS[slot % USER_IDS.length],
+        agent_id: slot % 3 === 0 ? AGENT_IDS[slot % AGENT_IDS.length] : null,
+        run_id: slot % 4 === 0 ? RUN_IDS[slot % RUN_IDS.length] : null,
+        hash: `hash-cooc-${index}`,
+        expiration_date: null,
+        categories: [first, second],
+        metadata: {
+          source: index % 2 === 0 ? "openclaw" : "mem0-sdk",
+          confidence: 0.82,
+          review_status: "approved",
+          reviewed_by: "admin@example.com",
+          reviewed_at: daysAgo(2),
+        },
+        created_at: daysAgo(ageDays),
+        updated_at: daysAgo(ageDays),
+        _history: [
+          {
+            id: uid(),
+            event: "ADD",
+            old_memory: null,
+            new_memory: text,
+            created_at: daysAgo(ageDays),
+          },
+        ],
+      });
     });
   }
   return rows;
