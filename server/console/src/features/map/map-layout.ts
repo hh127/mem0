@@ -9,13 +9,11 @@
  */
 import { forceCenter, forceCollide, forceLink, forceManyBody, forceSimulation } from "d3-force";
 import type { CategoryCatalog } from "@/lib/types";
-import { categoriesOf } from "@/features/memories/memory-utils";
+import { categoriesOf, expiryInfo, reviewStatusOf } from "@/features/memories/memory-utils";
 import type { Memory } from "@/features/memories/types";
 
 export const MAP_VIEW_WIDTH = 820;
 export const MAP_VIEW_HEIGHT = 560;
-/** 超过这个条数时只做聚合统计（本实现始终只渲染分类节点，不逐条渲染记忆）。 */
-export const LARGE_DATASET_THRESHOLD = 200;
 
 const MAP_PADDING = 76;
 const ITERATIONS = 320;
@@ -23,6 +21,12 @@ const MIN_NODE_RADIUS = 7;
 const MAX_NODE_RADIUS = 34;
 /** 两个中心点之间的保留空隙，给分类名称留位置。 */
 const NODE_GAP = 26;
+/** 标签高度固定，宽度按字符估算：CJK/全角 12px、ASCII 7px。 */
+const LABEL_HEIGHT = 14;
+/** 标签与所属节点圆之间的空隙。 */
+const LABEL_GAP = 4;
+/** 标签与其它节点圆之间保留的内边距。 */
+const LABEL_NODE_PADDING = 6;
 
 export interface CategoryStat {
   name: string;
@@ -45,8 +49,6 @@ export interface MemoryMapGraph {
   classified: number;
   maxCount: number;
   maxLinkCount: number;
-  /** 记忆条数超过阈值：只做聚合统计，不逐条渲染。 */
-  largeDataset: boolean;
 }
 
 export interface MapNode extends CategoryStat {
@@ -67,6 +69,174 @@ export interface MapLayout {
   edges: MapEdge[];
   maxCount: number;
   maxLinkCount: number;
+}
+
+export interface RecallBreakdown {
+  recallable: Memory[];
+  pending: number;
+  rejected: number;
+  expired: number;
+}
+
+/**
+ * 可召回口径分桶：未过期且审核通过才算可召回。
+ * 每条记忆只进一个桶，优先级 expired > rejected > pending；可召回的不计入任何桶。
+ */
+export function splitRecallable(memories: readonly Memory[]): RecallBreakdown {
+  const recallable: Memory[] = [];
+  let pending = 0;
+  let rejected = 0;
+  let expired = 0;
+  for (const memory of memories) {
+    if (expiryInfo(memory.expiration_date).expired) {
+      expired += 1;
+      continue;
+    }
+    const status = reviewStatusOf(memory);
+    if (status === "approved") {
+      recallable.push(memory);
+    } else if (status === "rejected") {
+      rejected += 1;
+    } else {
+      pending += 1;
+    }
+  }
+  return { recallable, pending, rejected, expired };
+}
+
+export interface PlacedLabel {
+  name: string;
+  x: number;
+  y: number;
+  hidden: boolean;
+}
+
+interface LabelRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** CJK、韩文与全角字符按 12px 估算，其余按 7px。 */
+function labelCharWidth(codePoint: number): number {
+  if (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    (codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe4f) ||
+    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+  ) {
+    return 12;
+  }
+  return 7;
+}
+
+function measureLabel(name: string): number {
+  let width = 0;
+  for (const char of name) width += labelCharWidth(char.codePointAt(0) ?? 0);
+  return width;
+}
+
+function rectAt(x: number, y: number, halfWidth: number, halfHeight: number): LabelRect {
+  return {
+    left: x - halfWidth,
+    top: y - halfHeight,
+    right: x + halfWidth,
+    bottom: y + halfHeight,
+  };
+}
+
+/** 下方 → 上方 → 右侧 → 左侧。 */
+function candidateRects(node: MapNode, width: number): [LabelRect, LabelRect, LabelRect, LabelRect] {
+  const halfWidth = width / 2;
+  const halfHeight = LABEL_HEIGHT / 2;
+  return [
+    rectAt(node.x, node.y + node.r + LABEL_GAP + halfHeight, halfWidth, halfHeight),
+    rectAt(node.x, node.y - node.r - LABEL_GAP - halfHeight, halfWidth, halfHeight),
+    rectAt(node.x + node.r + LABEL_GAP + halfWidth, node.y, halfWidth, halfHeight),
+    rectAt(node.x - node.r - LABEL_GAP - halfWidth, node.y, halfWidth, halfHeight),
+  ];
+}
+
+function rectsOverlap(left: LabelRect, right: LabelRect): boolean {
+  return (
+    left.left < right.right &&
+    right.left < left.right &&
+    left.top < right.bottom &&
+    right.top < left.bottom
+  );
+}
+
+function rectHitsCircle(rect: LabelRect, node: MapNode): boolean {
+  const radius = node.r + LABEL_NODE_PADDING;
+  const nearestX = Math.min(Math.max(node.x, rect.left), rect.right);
+  const nearestY = Math.min(Math.max(node.y, rect.top), rect.bottom);
+  const dx = node.x - nearestX;
+  const dy = node.y - nearestY;
+  return dx * dx + dy * dy < radius * radius;
+}
+
+/**
+ * 标签避让布局：按条数从多到少依次占位，参照已放置标签与其它节点圆。
+ * 四个候选都放不下时标记 hidden，坐标回落到下方候选位置；结果顺序与入参一致。
+ */
+export function placeLabels(
+  nodes: readonly MapNode[],
+  options?: { viewWidth?: number; viewHeight?: number },
+): PlacedLabel[] {
+  const viewWidth = options?.viewWidth ?? MAP_VIEW_WIDTH;
+  const viewHeight = options?.viewHeight ?? MAP_VIEW_HEIGHT;
+  const placedRects: LabelRect[] = [];
+  const byName = new Map<string, PlacedLabel>();
+
+  const order = [...nodes].sort(
+    (left, right) => right.count - left.count || left.name.localeCompare(right.name, "zh-CN"),
+  );
+
+  for (const node of order) {
+    const candidates = candidateRects(node, measureLabel(node.name));
+    let chosen = null as { rect: LabelRect } | null;
+    for (const rect of candidates) {
+      if (rect.left < 0 || rect.top < 0 || rect.right > viewWidth || rect.bottom > viewHeight) {
+        continue;
+      }
+      if (placedRects.some((other) => rectsOverlap(rect, other))) continue;
+      if (nodes.some((other) => other !== node && rectHitsCircle(rect, other))) continue;
+      chosen = { rect };
+      break;
+    }
+
+    if (chosen) {
+      placedRects.push(chosen.rect);
+      byName.set(node.name, {
+        name: node.name,
+        x: (chosen.rect.left + chosen.rect.right) / 2,
+        y: (chosen.rect.top + chosen.rect.bottom) / 2,
+        hidden: false,
+      });
+    } else {
+      const below = candidates[0];
+      byName.set(node.name, {
+        name: node.name,
+        x: (below.left + below.right) / 2,
+        y: (below.top + below.bottom) / 2,
+        hidden: true,
+      });
+    }
+  }
+
+  return nodes.map(
+    (node) =>
+      byName.get(node.name) ?? {
+        name: node.name,
+        x: node.x,
+        y: node.y + node.r + LABEL_GAP + LABEL_HEIGHT / 2,
+        hidden: true,
+      },
+  );
 }
 
 /**
@@ -153,7 +323,6 @@ export function buildMapGraph(
     classified: memories.length - uncategorized,
     maxCount,
     maxLinkCount,
-    largeDataset: memories.length > LARGE_DATASET_THRESHOLD,
   };
 }
 

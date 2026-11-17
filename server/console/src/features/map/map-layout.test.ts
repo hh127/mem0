@@ -11,8 +11,11 @@ import {
   edgeWidthFor,
   neighborsOf,
   nodeFillOpacity,
+  placeLabels,
   radiusFor,
+  splitRecallable,
 } from "./map-layout";
+import type { MapNode, PlacedLabel } from "./map-layout";
 
 function memory(id: string, categories: string[]): Memory {
   return {
@@ -23,6 +26,16 @@ function memory(id: string, categories: string[]): Memory {
     run_id: null,
     categories,
   };
+}
+
+function node(
+  name: string,
+  count: number,
+  x: number,
+  y: number,
+  r: number,
+): MapNode {
+  return { name, count, description: "", enabled: true, x, y, r };
 }
 
 const CATALOG: CategoryCatalog = {
@@ -83,15 +96,118 @@ describe("buildCoOccurrence", () => {
 });
 
 describe("buildMapGraph", () => {
-  it("汇总总数、未归类数量与阈值标记", () => {
+  it("汇总总数、未归类数量与已归类数量", () => {
     const many = Array.from({ length: 201 }, (_, index) => memory(String(index), index % 2 === 0 ? ["A"] : []));
     const graph = buildMapGraph(many, CATALOG);
 
     expect(graph.total).toBe(201);
     expect(graph.uncategorized).toBe(100);
     expect(graph.classified).toBe(101);
-    expect(graph.largeDataset).toBe(true);
-    expect(buildMapGraph(many.slice(0, 3), CATALOG).largeDataset).toBe(false);
+  });
+});
+
+describe("splitRecallable", () => {
+  it("按可召回 / 待审核 / 已驳回 / 已过期分桶，且过期优先于驳回", () => {
+    const approved: Memory = {
+      ...memory("1", []),
+      expiration_date: "2999-01-01",
+      metadata: { review_status: "approved" },
+    };
+    const pending = memory("2", []);
+    const rejected: Memory = {
+      ...memory("3", []),
+      metadata: { review_status: "rejected" },
+    };
+    const expired: Memory = {
+      ...memory("4", []),
+      expiration_date: "2000-01-01",
+      metadata: { review_status: "approved" },
+    };
+    // 同时已驳回且已过期：只计入 expired。
+    const rejectedExpired: Memory = {
+      ...memory("5", []),
+      expiration_date: "2000-01-01",
+      metadata: { review_status: "rejected" },
+    };
+
+    const result = splitRecallable([approved, pending, rejected, expired, rejectedExpired]);
+
+    expect(result.recallable.map((item) => item.id)).toEqual(["1"]);
+    expect(result.pending).toBe(1);
+    expect(result.rejected).toBe(1);
+    expect(result.expired).toBe(2);
+  });
+});
+
+function labelRect(label: PlacedLabel): { left: number; top: number; right: number; bottom: number } {
+  const width = [...label.name].reduce((sum, char) => sum + ((char.codePointAt(0) ?? 0) >= 0x2e80 ? 12 : 7), 0);
+  return {
+    left: label.x - width / 2,
+    right: label.x + width / 2,
+    top: label.y - 7,
+    bottom: label.y + 7,
+  };
+}
+
+function overlaps(
+  left: { left: number; top: number; right: number; bottom: number },
+  right: { left: number; top: number; right: number; bottom: number },
+): boolean {
+  return left.left < right.right && right.left < left.right && left.top < right.bottom && right.top < left.bottom;
+}
+
+describe("placeLabels", () => {
+  it("返回数量与节点一致、坐标有限且完全确定", () => {
+    const nodes: MapNode[] = [
+      node("个人信息", 8, 100, 120, 20),
+      node("工作信息", 5, 320, 240, 16),
+      node("空分类", 0, 560, 380, 9),
+    ];
+
+    const first = placeLabels(nodes);
+    const second = placeLabels(nodes);
+
+    expect(first).toHaveLength(nodes.length);
+    for (const label of first) {
+      expect(Number.isFinite(label.x)).toBe(true);
+      expect(Number.isFinite(label.y)).toBe(true);
+    }
+    expect(second).toEqual(first);
+  });
+
+  it("坐标极近的两个节点标签不重叠", () => {
+    const labels = placeLabels([node("甲", 2, 100, 100, 7), node("乙", 2, 100, 100, 7)]);
+    const first = labels[0];
+    const second = labels[1];
+
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    if (first && second) {
+      const moved = first.x !== second.x || first.y !== second.y;
+      expect(first.hidden || second.hidden || moved).toBe(true);
+      if (!first.hidden && !second.hidden) {
+        expect(overlaps(labelRect(first), labelRect(second))).toBe(false);
+      }
+    }
+  });
+
+  it("巨型节点周围的小节点标签放不下时标记 hidden", () => {
+    const nodes: MapNode[] = [node("巨型分类", 1000, 410, 280, 250)];
+    for (let index = 0; index < 12; index += 1) {
+      nodes.push(
+        node(
+          `小${index}`,
+          12 - index,
+          400 + (index % 4) * 4,
+          275 + Math.floor(index / 4) * 4,
+          7,
+        ),
+      );
+    }
+
+    const labels = placeLabels(nodes);
+
+    expect(labels.some((label) => label.hidden)).toBe(true);
   });
 });
 
