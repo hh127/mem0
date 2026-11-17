@@ -443,12 +443,102 @@ export function neighborsOf(
   );
 }
 
+export interface SimilarCategoryPair {
+  a: string;
+  b: string;
+  /** 两个名字共有的字符，按 a 的字符顺序去重排列，例如「技术」。 */
+  sharedChars: string;
+  /** 这两个分类在同一条记忆里同时出现的次数；0 表示从未共现。 */
+  coOccurrence: number;
+}
+
+/** 孤岛分类：条数达到 minCount（默认 2）但没有任何共现连线。 */
+export function findIslandCategories(
+  stats: readonly CategoryStat[],
+  links: readonly CoOccurrenceLink[],
+  minCount = 2,
+): CategoryStat[] {
+  const connected = new Set<string>();
+  for (const link of links) {
+    connected.add(link.source);
+    connected.add(link.target);
+  }
+  return stats
+    .filter((stat) => stat.count >= minCount && !connected.has(stat.name))
+    .sort(
+      (left, right) => right.count - left.count || left.name.localeCompare(right.name, "zh-CN"),
+    );
+}
+
+/** 按 a 的字符顺序取两个名字共有的字符并去重。 */
+function sharedCharsOf(a: string, b: string): string {
+  const pool = new Set(Array.from(b));
+  const seen = new Set<string>();
+  let shared = "";
+  for (const char of Array.from(a)) {
+    if (pool.has(char) && !seen.has(char)) {
+      seen.add(char);
+      shared += char;
+    }
+  }
+  return shared;
+}
+
+/** 疑似近义分类对：名字共有字符数达到 minSharedChars（默认 2）且两者都有记忆。 */
+export function findSimilarCategoryPairs(
+  stats: readonly CategoryStat[],
+  links: readonly CoOccurrenceLink[],
+  options?: { minSharedChars?: number },
+): SimilarCategoryPair[] {
+  const minSharedChars = options?.minSharedChars ?? 2;
+  const candidates = stats.filter((stat) => stat.count > 0);
+  const pairs: SimilarCategoryPair[] = [];
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    for (let j = i + 1; j < candidates.length; j += 1) {
+      const first = candidates[i];
+      const second = candidates[j];
+      if (!first || !second) continue;
+
+      const [a, b] =
+        first.name.localeCompare(second.name, "zh-CN") <= 0
+          ? [first.name, second.name]
+          : [second.name, first.name];
+
+      const sharedChars = sharedCharsOf(a, b);
+      if (sharedChars.length < minSharedChars) continue;
+
+      let coOccurrence = 0;
+      for (const link of links) {
+        if (
+          (link.source === a && link.target === b) ||
+          (link.source === b && link.target === a)
+        ) {
+          coOccurrence += link.count;
+        }
+      }
+
+      pairs.push({ a, b, sharedChars, coOccurrence });
+    }
+  }
+
+  return pairs.sort(
+    (left, right) =>
+      right.sharedChars.length - left.sharedChars.length ||
+      right.coOccurrence - left.coOccurrence ||
+      left.a.localeCompare(right.a, "zh-CN") ||
+      left.b.localeCompare(right.b, "zh-CN"),
+  );
+}
+
 interface SimNode extends CategoryStat {
   r: number;
   x: number;
   y: number;
   vx?: number;
   vy?: number;
+  fx?: number;
+  fy?: number;
   index?: number;
 }
 
@@ -463,13 +553,31 @@ function endpointNode(endpoint: string | SimNode): SimNode | null {
   return typeof endpoint === "string" ? null : endpoint;
 }
 
+export interface LayoutOptions {
+  /** 上一轮布局的节点。提供则复用坐标，只给新节点找位置。 */
+  previous?: readonly MapNode[];
+}
+
+/** 把新节点的坐标夹取到画布的可视区域内。 */
+function clampToViewX(x: number): number {
+  return Math.min(Math.max(x, MAP_PADDING), MAP_VIEW_WIDTH - MAP_PADDING);
+}
+
+function clampToViewY(y: number): number {
+  return Math.min(Math.max(y, MAP_PADDING), MAP_VIEW_HEIGHT - MAP_PADDING);
+}
+
 /**
  * 用 d3-force 计算布局。节点初值由黄金角螺旋确定，因此不依赖 Math.random，
  * 同一份数据的结果可复现（单测直接断言两次调用结果一致）。
+ *
+ * 传入 `options.previous` 且至少有一个同名节点可复用时进入稳定模式：复用节点
+ * 锁定在上一轮坐标上并跳过等比缩放，只让新节点参与排布。
  */
 export function buildLayout(
   stats: readonly CategoryStat[],
   links: readonly CoOccurrenceLink[],
+  options?: LayoutOptions,
 ): MapLayout {
   const centerX = MAP_VIEW_WIDTH / 2;
   const centerY = MAP_VIEW_HEIGHT / 2;
@@ -483,15 +591,43 @@ export function buildLayout(
   if (nodes.length === 0) return { nodes: [], edges: [], maxCount: 0, maxLinkCount: 0 };
 
   const byName = new Map(nodes.map((node) => [node.name, node]));
+  const previousByName = new Map<string, MapNode>();
+  for (const node of options?.previous ?? []) previousByName.set(node.name, node);
 
-  [...nodes]
-    .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name, "zh-CN"))
-    .forEach((node, index) => {
-      const angle = index * 2.39996;
-      const distance = 36 + 30 * Math.sqrt(index);
-      node.x = centerX + distance * Math.cos(angle);
-      node.y = centerY + distance * Math.sin(angle);
-    });
+  const reusable = nodes.filter((node) => previousByName.has(node.name));
+  const stable = reusable.length > 0;
+
+  if (stable) {
+    // 复用节点直接锁定在上一轮坐标上，半径仍按当前条数重新计算。
+    for (const node of reusable) {
+      const before = previousByName.get(node.name);
+      if (!before) continue;
+      node.x = before.x;
+      node.y = before.y;
+      node.fx = before.x;
+      node.fy = before.y;
+    }
+
+    // 新节点只在自身集合内按条数降序编号，避免全部叠在螺旋起点。
+    nodes
+      .filter((node) => !previousByName.has(node.name))
+      .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name, "zh-CN"))
+      .forEach((node, index) => {
+        const angle = index * 2.39996;
+        const distance = 36 + 30 * Math.sqrt(index);
+        node.x = centerX + distance * Math.cos(angle);
+        node.y = centerY + distance * Math.sin(angle);
+      });
+  } else {
+    [...nodes]
+      .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name, "zh-CN"))
+      .forEach((node, index) => {
+        const angle = index * 2.39996;
+        const distance = 36 + 30 * Math.sqrt(index);
+        node.x = centerX + distance * Math.cos(angle);
+        node.y = centerY + distance * Math.sin(angle);
+      });
+  }
 
   const simLinks: SimLink[] = links
     .filter((link) => byName.has(link.source) && byName.has(link.target))
@@ -521,36 +657,50 @@ export function buildLayout(
 
   for (let step = 0; step < ITERATIONS; step += 1) simulation.tick();
 
-  let minX = Infinity;
-  let maxX = -Infinity;
-  let minY = Infinity;
-  let maxY = -Infinity;
-  for (const node of nodes) {
-    minX = Math.min(minX, node.x - node.r);
-    maxX = Math.max(maxX, node.x + node.r);
-    minY = Math.min(minY, node.y - node.r);
-    maxY = Math.max(maxY, node.y + node.r);
+  let mapNodes: MapNode[];
+  if (stable) {
+    // 稳定模式不缩放：复用节点保持上一轮坐标系，新节点夹取到画布内。
+    mapNodes = nodes.map((node) => ({
+      name: node.name,
+      count: node.count,
+      description: node.description,
+      enabled: node.enabled,
+      x: node.fx ?? clampToViewX(node.x),
+      y: node.fy ?? clampToViewY(node.y),
+      r: Math.min(Math.max(radiusFor(node.count), MIN_NODE_RADIUS), MAX_NODE_RADIUS),
+    }));
+  } else {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const node of nodes) {
+      minX = Math.min(minX, node.x - node.r);
+      maxX = Math.max(maxX, node.x + node.r);
+      minY = Math.min(minY, node.y - node.r);
+      maxY = Math.max(maxY, node.y + node.r);
+    }
+
+    const spanX = Math.max(maxX - minX, 1);
+    const spanY = Math.max(maxY - minY, 1);
+    const scale = Math.min(
+      (MAP_VIEW_WIDTH - MAP_PADDING * 2) / spanX,
+      (MAP_VIEW_HEIGHT - MAP_PADDING * 2) / spanY,
+      1.2,
+    );
+    const offsetX = (MAP_VIEW_WIDTH - spanX * scale) / 2 - minX * scale;
+    const offsetY = (MAP_VIEW_HEIGHT - spanY * scale) / 2 - minY * scale;
+
+    mapNodes = nodes.map((node) => ({
+      name: node.name,
+      count: node.count,
+      description: node.description,
+      enabled: node.enabled,
+      x: node.x * scale + offsetX,
+      y: node.y * scale + offsetY,
+      r: Math.min(Math.max(node.r * scale, MIN_NODE_RADIUS), MAX_NODE_RADIUS),
+    }));
   }
-
-  const spanX = Math.max(maxX - minX, 1);
-  const spanY = Math.max(maxY - minY, 1);
-  const scale = Math.min(
-    (MAP_VIEW_WIDTH - MAP_PADDING * 2) / spanX,
-    (MAP_VIEW_HEIGHT - MAP_PADDING * 2) / spanY,
-    1.2,
-  );
-  const offsetX = (MAP_VIEW_WIDTH - spanX * scale) / 2 - minX * scale;
-  const offsetY = (MAP_VIEW_HEIGHT - spanY * scale) / 2 - minY * scale;
-
-  const mapNodes: MapNode[] = nodes.map((node) => ({
-    name: node.name,
-    count: node.count,
-    description: node.description,
-    enabled: node.enabled,
-    x: node.x * scale + offsetX,
-    y: node.y * scale + offsetY,
-    r: Math.min(Math.max(node.r * scale, MIN_NODE_RADIUS), MAX_NODE_RADIUS),
-  }));
 
   const nodeByName = new Map(mapNodes.map((node) => [node.name, node]));
   const edges: MapEdge[] = [];

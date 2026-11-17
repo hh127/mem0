@@ -4,14 +4,15 @@
  * 纯布局在 `./map-layout`（d3-force，确定性、可单测）。SVG 里的颜色全部来自
  * CSS token（`var(--c-accent)` / `fill-ink` 等），因此深色模式自动适配。
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowUpRight, Library, Network, RefreshCw } from "lucide-react";
+import { ArrowUpRight, Download, Library, Network, RefreshCw, RotateCcw } from "lucide-react";
 import { useSession } from "@/lib/session";
 import { cn, errorMessage, formatNumber } from "@/lib/utils";
 import { Badge, Button, Card, Checkbox, Select } from "@/ui/primitives";
 import { EmptyState, ErrorState, PageHeader } from "@/ui/feedback";
+import { useToast } from "@/ui/toast";
 import {
   MEMORY_FETCH_LIMIT,
   fetchCategoryCatalog,
@@ -28,13 +29,17 @@ import {
   edgeOpacityFor,
   edgeWidthFor,
   filterByTimeWindow,
+  findIslandCategories,
+  findSimilarCategoryPairs,
   neighborsOf,
   nodeFillOpacity,
   placeLabels,
   recentShare,
   splitRecallable,
+  type MapNode,
   type MapTimeWindow,
 } from "./map-layout";
+import { buildSvgFileName, downloadSvg, serializeMapSvg } from "./map-export";
 
 const TIME_WINDOW_LABELS: Record<MapTimeWindow, string> = {
   all: "全部时间",
@@ -52,6 +57,8 @@ export function MapPage() {
   const { user, isAdmin } = useSession();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const { success: toastSuccess, error: toastError } = useToast();
+  const svgRef = useRef<SVGSVGElement | null>(null);
 
   const scopeUserId = !isAdmin ? user?.memory_scope ?? user?.id ?? "" : "";
   const filters = useMemo(() => (scopeUserId ? { user_id: scopeUserId } : {}), [scopeUserId]);
@@ -72,6 +79,18 @@ export function MapPage() {
     void catalogQuery.refetch();
   };
 
+  const handleExport = () => {
+    const node = svgRef.current;
+    if (!node) return;
+    try {
+      const filename = buildSvgFileName();
+      downloadSvg(filename, serializeMapSvg(node));
+      toastSuccess("已导出记忆地图 SVG");
+    } catch (exportError) {
+      toastError(errorMessage(exportError, "导出记忆地图失败"));
+    }
+  };
+
   const allMemories = useMemo(() => memoriesQuery.data ?? [], [memoriesQuery.data]);
   const recall = useMemo(() => splitRecallable(allMemories), [allMemories]);
 
@@ -80,6 +99,8 @@ export function MapPage() {
   const [timeWindow, setTimeWindow] = useState<MapTimeWindow>("all");
   const [pinnedName, setPinnedName] = useState<string | null>(() => searchParams.get("focus"));
   const [hoveredName, setHoveredName] = useState<string | null>(null);
+  const previousLayoutRef = useRef<MapNode[] | null>(null);
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
 
   const baseMemories = useMemo(
     () => (onlyRecallable ? recall.recallable : allMemories),
@@ -106,7 +127,12 @@ export function MapPage() {
     () => (showEmptyCategories ? graph.stats : graph.stats.filter((stat) => stat.count > 0)),
     [graph.stats, showEmptyCategories],
   );
-  const layout = useMemo(() => buildLayout(layoutStats, graph.links), [layoutStats, graph.links]);
+  const layout = useMemo(() => {
+    const previous = previousLayoutRef.current ?? undefined;
+    const next = buildLayout(layoutStats, graph.links, { previous });
+    previousLayoutRef.current = next.nodes;
+    return next;
+  }, [layoutStats, graph.links, layoutEpoch]);
   const labelByName = useMemo(() => {
     const labels = placeLabels(layout.nodes);
     return new Map(labels.map((label) => [label.name, label]));
@@ -127,10 +153,27 @@ export function MapPage() {
     () => graph.stats.filter((stat) => stat.count > 0).slice(0, 8),
     [graph.stats],
   );
+  const islands = useMemo(
+    () => findIslandCategories(graph.stats, graph.links),
+    [graph.stats, graph.links],
+  );
+  const similarPairs = useMemo(
+    () => findSimilarCategoryPairs(graph.stats, graph.links),
+    [graph.stats, graph.links],
+  );
 
   const openCategory = (name: string) => navigate(`/memories?category=${encodeURIComponent(name)}`);
   const togglePinned = (name: string) =>
     setPinnedName((current) => (current === name ? null : name));
+  const toggleSimilarPair = (a: string, b: string) => {
+    const hasA = layout.nodes.some((node) => node.name === a);
+    const hasB = layout.nodes.some((node) => node.name === b);
+    togglePinned(!hasA && hasB ? b : a);
+  };
+  const resetLayout = () => {
+    previousLayoutRef.current = null;
+    setLayoutEpoch((value) => value + 1);
+  };
 
   // URL 里的 focus 只作初始值；数据就绪后若分类已不在当前布局里就丢弃。
   useEffect(() => {
@@ -167,12 +210,16 @@ export function MapPage() {
       <PageHeader
         eyebrow="记忆"
         title="记忆地图"
-        description="按分类分布与共现关系浏览记忆；圆圈越大记忆越多，连线越粗共现越频繁。默认只统计已通过且未过期的可召回记忆，可在下方切换为全部记忆。"
+        description="按分类分布与共现关系浏览记忆；圆圈越大记忆越多，连线越粗共现越频繁。默认只统计已通过且未过期的可召回记忆，可在下方切换为全部记忆。下方会给出孤岛与疑似近义分类，帮助整理分类目录。"
         actions={
           <>
             <Button variant="secondary" onClick={() => navigate("/memories")}>
               <Library className="size-4" />
               返回记忆库
+            </Button>
+            <Button variant="secondary" onClick={handleExport}>
+              <Download className="size-4" />
+              导出 SVG
             </Button>
             <Button variant="ghost" size="icon" aria-label="刷新记忆地图" disabled={memoriesQuery.isFetching} onClick={refetchAll}>
               <RefreshCw className={cn("size-4", memoriesQuery.isFetching && "animate-spin")} />
@@ -241,6 +288,10 @@ export function MapPage() {
             ))}
           </Select>
         </label>
+        <Button variant="ghost" size="sm" onClick={resetLayout}>
+          <RotateCcw className="size-3.5" />
+          重新排布
+        </Button>
       </div>
 
       {isLoading ? (
@@ -308,6 +359,7 @@ export function MapPage() {
           <Card className="min-w-0 flex-1">
             <div className="p-2 sm:p-3">
               <svg
+                ref={svgRef}
                 viewBox={`0 0 ${MAP_VIEW_WIDTH} ${MAP_VIEW_HEIGHT}`}
                 className="h-auto w-full select-none"
                 role="img"
@@ -479,6 +531,14 @@ export function MapPage() {
                     <dd className="text-right tabular-nums text-ink">{formatNumber(recall.rejected)}</dd>
                     <dt className="text-ink-faint">已过期</dt>
                     <dd className="text-right tabular-nums text-ink">{formatNumber(recall.expired)}</dd>
+                    {graph.uncategorized > 0 ? (
+                      <>
+                        <dt className="text-ink-faint">未归类</dt>
+                        <dd className="text-right tabular-nums text-ink">
+                          {formatNumber(graph.uncategorized)} 条
+                        </dd>
+                      </>
+                    ) : null}
                   </dl>
                   {windowed.undated > 0 ? (
                     <dl className="grid grid-cols-2 gap-y-2 text-xs">
@@ -500,7 +560,7 @@ export function MapPage() {
                     <dd className="text-right tabular-nums text-ink">{graph.maxCount} 条</dd>
                   </dl>
                   <p className="text-xs leading-5 text-ink-faint">
-                    悬停可预览分类；点击圆圈或列表可固定选中，再次点击或按 Esc 取消。跳转请用「查看该类记忆」。
+                    悬停可预览分类；点击圆圈或列表可固定选中，再次点击或按 Esc 取消。跳转请用「查看该类记忆」。数据更新后分类位置会尽量保持不变；需要重排时点「重新排布」。
                   </p>
                   <div className="space-y-1.5">
                     <p className="text-xs font-medium text-ink-soft">记忆最多的分类</p>
@@ -524,6 +584,68 @@ export function MapPage() {
                   </div>
                 </div>
               )}
+              <div className="mt-3 border-t border-line pt-3">
+                <p className="text-xs font-medium text-ink-soft">需要留意的分类</p>
+                <div className="mt-2 space-y-3">
+                  {islands.length > 0 ? (
+                    <div className="space-y-1.5">
+                      <p className="text-xs tabular-nums text-ink-soft">孤岛分类 {islands.length} 个</p>
+                      {islands.slice(0, 5).map((stat) => (
+                        <button
+                          key={stat.name}
+                          type="button"
+                          className="flex w-full items-center justify-between rounded-md px-2 py-1 text-left text-xs text-ink-soft hover:bg-panel-2"
+                          onClick={() => togglePinned(stat.name)}
+                          onMouseEnter={() => setHoveredName(stat.name)}
+                          onMouseLeave={() => setHoveredName(null)}
+                        >
+                          <span className="truncate">{stat.name}</span>
+                          <span className="shrink-0 tabular-nums text-ink-faint">{stat.count} 条</span>
+                        </button>
+                      ))}
+                      <p className="text-xs text-ink-faint">
+                        这些分类有记忆，但从没和其它分类同时出现——可能是命名过窄，或本该归到已有分类。
+                      </p>
+                    </div>
+                  ) : null}
+                  {similarPairs.length > 0 ? (
+                    <div className="space-y-1.5">
+                      <p className="text-xs tabular-nums text-ink-soft">疑似近义 {similarPairs.length} 对</p>
+                      {similarPairs.slice(0, 5).map((pair) => (
+                        <button
+                          key={`${pair.a}\u0000${pair.b}`}
+                          type="button"
+                          className="flex w-full items-center justify-between rounded-md px-2 py-1 text-left text-xs text-ink-soft hover:bg-panel-2"
+                          onClick={() => toggleSimilarPair(pair.a, pair.b)}
+                        >
+                          <span className="truncate">
+                            {pair.a} ↔ {pair.b}
+                          </span>
+                          <span className="shrink-0 tabular-nums text-ink-faint">
+                            共享 {pair.sharedChars} · 共现 {pair.coOccurrence}
+                          </span>
+                        </button>
+                      ))}
+                      <p className="text-xs text-ink-faint">
+                        名字高度重叠的分类会让记忆被拆散，考虑合并后重跑分类。
+                      </p>
+                    </div>
+                  ) : null}
+                  {islands.length === 0 && similarPairs.length === 0 ? (
+                    <p className="text-xs text-ink-faint">没有发现明显的孤岛或近义分类。</p>
+                  ) : null}
+                  {isAdmin ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => navigate("/categories/manage")}
+                    >
+                      去分类管理
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
             </Card>
           </aside>
         </div>

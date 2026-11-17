@@ -13,6 +13,8 @@ import {
   countRecentByCategory,
   edgeWidthFor,
   filterByTimeWindow,
+  findIslandCategories,
+  findSimilarCategoryPairs,
   neighborsOf,
   nodeFillOpacity,
   placeLabels,
@@ -20,7 +22,7 @@ import {
   recentShare,
   splitRecallable,
 } from "./map-layout";
-import type { MapNode, PlacedLabel } from "./map-layout";
+import type { CategoryStat, CoOccurrenceLink, MapNode, PlacedLabel } from "./map-layout";
 
 function memory(id: string, categories: string[], createdAt?: string): Memory {
   return {
@@ -269,6 +271,79 @@ describe("buildLayout", () => {
   });
 });
 
+describe("buildLayout 稳定模式", () => {
+  const statsA: CategoryStat[] = [
+    { name: "A", count: 3, description: "", enabled: true },
+    { name: "B", count: 2, description: "", enabled: true },
+    { name: "C", count: 1, description: "", enabled: true },
+  ];
+  const linksA: CoOccurrenceLink[] = [{ source: "A", target: "B", count: 1 }];
+  const layoutA = buildLayout(statsA, linksA);
+
+  const statsB: CategoryStat[] = [
+    ...statsA,
+    { name: "D", count: 1, description: "", enabled: true },
+  ];
+
+  it("复用节点坐标严格不漂移", () => {
+    const layoutB = buildLayout(statsB, linksA, { previous: layoutA.nodes });
+
+    for (const name of ["A", "B", "C"]) {
+      const before = layoutA.nodes.find((node) => node.name === name);
+      const after = layoutB.nodes.find((node) => node.name === name);
+      expect(before).toBeDefined();
+      expect(after).toBeDefined();
+      expect(after?.x).toBe(before?.x);
+      expect(after?.y).toBe(before?.y);
+    }
+  });
+
+  it("新节点落在画布内且不与复用节点重合", () => {
+    const layoutB = buildLayout(statsB, linksA, { previous: layoutA.nodes });
+
+    for (const node of layoutB.nodes) {
+      expect(node.x).toBeGreaterThan(0);
+      expect(node.x).toBeLessThan(MAP_VIEW_WIDTH);
+      expect(node.y).toBeGreaterThan(0);
+      expect(node.y).toBeLessThan(MAP_VIEW_HEIGHT);
+    }
+
+    const added = layoutB.nodes.find((node) => node.name === "D");
+    expect(added).toBeDefined();
+    for (const name of ["A", "B", "C"]) {
+      const reused = layoutB.nodes.find((node) => node.name === name);
+      expect(added?.x === reused?.x && added?.y === reused?.y).toBe(false);
+    }
+  });
+
+  it("相同 previous 两次调用结果完全一致", () => {
+    const first = buildLayout(statsB, linksA, { previous: layoutA.nodes });
+    const second = buildLayout(statsB, linksA, { previous: layoutA.nodes });
+
+    expect(second.nodes).toEqual(first.nodes);
+    expect(second.edges).toEqual(first.edges);
+  });
+
+  it("空 previous 等价于不传", () => {
+    expect(buildLayout(statsA, linksA, { previous: [] })).toEqual(buildLayout(statsA, linksA));
+  });
+
+  it("名字完全不匹配的 previous 被忽略", () => {
+    const previous: MapNode[] = [
+      { name: "无关分类", count: 4, description: "", enabled: true, x: 40, y: 40, r: 20 },
+    ];
+    const layout = buildLayout(statsA, linksA, { previous });
+
+    expect(layout.nodes).toHaveLength(statsA.length);
+    for (const node of layout.nodes) {
+      expect(node.x).toBeGreaterThan(0);
+      expect(node.x).toBeLessThan(MAP_VIEW_WIDTH);
+      expect(node.y).toBeGreaterThan(0);
+      expect(node.y).toBeLessThan(MAP_VIEW_HEIGHT);
+    }
+  });
+});
+
 describe("visual helpers", () => {
   it("节点填充与连线粗细随强度单调增加", () => {
     expect(nodeFillOpacity(0, 10)).toBe(0);
@@ -385,5 +460,139 @@ describe("时间窗口常量", () => {
   it("外环天数与 7d 窗口天数固定", () => {
     expect(RECENT_RING_DAYS).toBe(30);
     expect(TIME_WINDOW_DAYS["7d"]).toBe(7);
+  });
+});
+
+describe("findIslandCategories", () => {
+  const stats = [
+    { name: "A", count: 3, description: "孤岛 A", enabled: true },
+    { name: "B", count: 3, description: "有连线 B", enabled: false },
+    { name: "C", count: 1, description: "只有一条 C", enabled: true },
+  ];
+  const links = [{ source: "B", target: "D", count: 2 }];
+
+  it("默认只看条数 >= 2 且无任何共现的分类", () => {
+    expect(findIslandCategories(stats, links).map((stat) => stat.name)).toEqual(["A"]);
+  });
+
+  it("minCount 传 1 时连只有一条的分类也算候选", () => {
+    expect(findIslandCategories(stats, links, 1).map((stat) => stat.name)).toEqual(["A", "C"]);
+  });
+
+  it("按条数降序、并列按名称升序排列", () => {
+    const islands = [
+      { name: "乙", count: 3, description: "", enabled: true },
+      { name: "甲", count: 3, description: "", enabled: true },
+      { name: "丙", count: 5, description: "", enabled: true },
+    ];
+
+    expect(findIslandCategories(islands, []).map((stat) => stat.name)).toEqual(["丙", "甲", "乙"]);
+  });
+
+  it("返回入参里的原对象，保留 description 与 enabled", () => {
+    const result = findIslandCategories(stats, links);
+
+    expect(result[0]).toBe(stats[0]);
+    expect(result[0]?.description).toBe("孤岛 A");
+    expect(result[0]?.enabled).toBe(true);
+  });
+});
+
+describe("findSimilarCategoryPairs", () => {
+  it("名字高度重叠的分类构成一对，sharedChars 按 a 的顺序去重", () => {
+    const pairs = findSimilarCategoryPairs(
+      [
+        { name: "技术能力", count: 2, description: "", enabled: true },
+        { name: "技术偏好", count: 2, description: "", enabled: true },
+      ],
+      [],
+    );
+
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]?.sharedChars).toBe("技术");
+  });
+
+  it("工作信息与工作项目共享「工作」", () => {
+    const pairs = findSimilarCategoryPairs(
+      [
+        { name: "工作信息", count: 1, description: "", enabled: true },
+        { name: "工作项目", count: 1, description: "", enabled: true },
+      ],
+      [],
+    );
+
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]?.sharedChars).toBe("工作");
+  });
+
+  it("没有共同字符的分类不输出", () => {
+    const pairs = findSimilarCategoryPairs(
+      [
+        { name: "技术能力", count: 2, description: "", enabled: true },
+        { name: "健康记录", count: 2, description: "", enabled: true },
+      ],
+      [],
+    );
+
+    expect(pairs).toEqual([]);
+  });
+
+  it("count 为 0 的空分类不参与配对", () => {
+    const pairs = findSimilarCategoryPairs(
+      [
+        { name: "技术能力", count: 2, description: "", enabled: true },
+        { name: "技术偏好", count: 0, description: "", enabled: true },
+      ],
+      [],
+    );
+
+    expect(pairs).toEqual([]);
+  });
+
+  it("共现次数从 links 读取，正向与反向写法都认", () => {
+    const stats = [
+      { name: "技术能力", count: 2, description: "", enabled: true },
+      { name: "技术偏好", count: 2, description: "", enabled: true },
+    ];
+
+    const forward = findSimilarCategoryPairs(stats, [
+      { source: "技术能力", target: "技术偏好", count: 3 },
+    ]);
+    const reverse = findSimilarCategoryPairs(stats, [
+      { source: "技术偏好", target: "技术能力", count: 3 },
+    ]);
+
+    expect(forward[0]?.coOccurrence).toBe(3);
+    expect(reverse[0]?.coOccurrence).toBe(3);
+    expect(findSimilarCategoryPairs(stats, [])[0]?.coOccurrence).toBe(0);
+  });
+
+  it("minSharedChars 传 3 时两个字符的重叠不再输出", () => {
+    const stats = [
+      { name: "技术能力", count: 2, description: "", enabled: true },
+      { name: "技术偏好", count: 2, description: "", enabled: true },
+      { name: "工作信息", count: 1, description: "", enabled: true },
+      { name: "工作项目", count: 1, description: "", enabled: true },
+    ];
+
+    expect(findSimilarCategoryPairs(stats, [], { minSharedChars: 3 })).toEqual([]);
+  });
+
+  it("每一对只输出一次，且 a、b 已按 zh-CN 排序", () => {
+    const pairs = findSimilarCategoryPairs(
+      [
+        { name: "技术偏好", count: 2, description: "", enabled: true },
+        { name: "技术能力", count: 2, description: "", enabled: true },
+      ],
+      [],
+    );
+
+    expect(pairs).toHaveLength(1);
+    const pair = pairs[0];
+    expect(pair).toBeDefined();
+    if (pair) {
+      expect(pair.a.localeCompare(pair.b, "zh-CN")).toBeLessThanOrEqual(0);
+      expect(pair.sharedChars).toBe("技术");
+    }
   });
 });
