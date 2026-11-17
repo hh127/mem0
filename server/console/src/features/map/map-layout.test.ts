@@ -4,20 +4,25 @@ import type { Memory } from "@/features/memories/types";
 import {
   MAP_VIEW_HEIGHT,
   MAP_VIEW_WIDTH,
+  RECENT_RING_DAYS,
+  TIME_WINDOW_DAYS,
   buildCategoryStats,
   buildCoOccurrence,
   buildLayout,
   buildMapGraph,
+  countRecentByCategory,
   edgeWidthFor,
+  filterByTimeWindow,
   neighborsOf,
   nodeFillOpacity,
   placeLabels,
   radiusFor,
+  recentShare,
   splitRecallable,
 } from "./map-layout";
 import type { MapNode, PlacedLabel } from "./map-layout";
 
-function memory(id: string, categories: string[]): Memory {
+function memory(id: string, categories: string[], createdAt?: string): Memory {
   return {
     id,
     memory: `记忆 ${id}`,
@@ -25,7 +30,16 @@ function memory(id: string, categories: string[]): Memory {
     agent_id: null,
     run_id: null,
     categories,
+    ...(createdAt === undefined ? {} : { created_at: createdAt }),
   };
+}
+
+/** 固定时间基准，避免断言依赖真实当前时间。 */
+const NOW = new Date("2026-11-17T00:00:00Z").getTime();
+const DAY_MS = 86_400_000;
+
+function daysAgo(days: number): string {
+  return new Date(NOW - days * DAY_MS).toISOString();
 }
 
 function node(
@@ -279,5 +293,97 @@ describe("neighborsOf", () => {
       { name: "C", count: 5 },
       { name: "B", count: 2 },
     ]);
+  });
+});
+
+describe("filterByTimeWindow", () => {
+  it("all 返回全部记忆并统计无时间条数", () => {
+    const result = filterByTimeWindow(
+      [
+        memory("1", ["A"], daysAgo(3)),
+        memory("2", ["A"], daysAgo(100)),
+        memory("3", ["A"]),
+      ],
+      "all",
+      NOW,
+    );
+
+    expect(result.memories.map((item) => item.id)).toEqual(["1", "2", "3"]);
+    expect(result.undated).toBe(1);
+  });
+
+  it("7d 窗口保留边界当天，排除更早的记忆", () => {
+    const result = filterByTimeWindow(
+      [
+        memory("3d", ["A"], daysAgo(3)),
+        memory("7d", ["A"], daysAgo(7)),
+        memory("8d", ["A"], daysAgo(8)),
+      ],
+      "7d",
+      NOW,
+    );
+
+    expect(result.memories.map((item) => item.id)).toEqual(["3d", "7d"]);
+    expect(result.undated).toBe(0);
+  });
+
+  it("非 all 窗口排除无时间的记忆并计入 undated", () => {
+    const result = filterByTimeWindow(
+      [memory("dated", ["A"], daysAgo(1)), memory("undated", ["A"])],
+      "7d",
+      NOW,
+    );
+
+    expect(result.memories.map((item) => item.id)).toEqual(["dated"]);
+    expect(result.undated).toBe(1);
+  });
+
+  it("8 天前的记忆在 30d 窗口里保留", () => {
+    const result = filterByTimeWindow([memory("8d", ["A"], daysAgo(8))], "30d", NOW);
+
+    expect(result.memories.map((item) => item.id)).toEqual(["8d"]);
+  });
+});
+
+describe("countRecentByCategory", () => {
+  it("同一分类的近期记忆累计，超窗的不计", () => {
+    const counts = countRecentByCategory(
+      [
+        memory("1", ["工作信息"], daysAgo(1)),
+        memory("2", ["工作信息"], daysAgo(2)),
+        memory("3", ["工作信息"], daysAgo(40)),
+      ],
+      30,
+      NOW,
+    );
+
+    expect(counts.get("工作信息")).toBe(2);
+  });
+
+  it("同一条记忆里的重复分类只计 1", () => {
+    const counts = countRecentByCategory([memory("1", ["A", "A"], daysAgo(1))], 30, NOW);
+
+    expect(counts.get("A")).toBe(1);
+  });
+
+  it("没有分类的记忆不产生键", () => {
+    const counts = countRecentByCategory([memory("1", [], daysAgo(1))], 30, NOW);
+
+    expect(counts.size).toBe(0);
+  });
+});
+
+describe("recentShare", () => {
+  it("总数非正返回 0，正常比例按除法，超出范围夹取到 1", () => {
+    expect(recentShare(0, 0)).toBe(0);
+    expect(recentShare(5, 10)).toBe(0.5);
+    expect(recentShare(20, 10)).toBe(1);
+  });
+});
+
+describe("时间窗口常量", () => {
+  it("外环天数与 7d 窗口天数固定", () => {
+    expect(RECENT_RING_DAYS).toBe(30);
+    expect(TIME_WINDOW_DAYS["7d"]).toBe(7);
   });
 });

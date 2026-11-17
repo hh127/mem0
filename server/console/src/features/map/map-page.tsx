@@ -10,7 +10,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowUpRight, Library, Network, RefreshCw } from "lucide-react";
 import { useSession } from "@/lib/session";
 import { cn, errorMessage, formatNumber } from "@/lib/utils";
-import { Badge, Button, Card, Checkbox } from "@/ui/primitives";
+import { Badge, Button, Card, Checkbox, Select } from "@/ui/primitives";
 import { EmptyState, ErrorState, PageHeader } from "@/ui/feedback";
 import {
   MEMORY_FETCH_LIMIT,
@@ -21,15 +21,32 @@ import {
 import {
   MAP_VIEW_HEIGHT,
   MAP_VIEW_WIDTH,
+  RECENT_RING_DAYS,
   buildLayout,
   buildMapGraph,
+  countRecentByCategory,
   edgeOpacityFor,
   edgeWidthFor,
+  filterByTimeWindow,
   neighborsOf,
   nodeFillOpacity,
   placeLabels,
+  recentShare,
   splitRecallable,
+  type MapTimeWindow,
 } from "./map-layout";
+
+const TIME_WINDOW_LABELS: Record<MapTimeWindow, string> = {
+  all: "全部时间",
+  "7d": "近 7 天",
+  "30d": "近 30 天",
+  "90d": "近 90 天",
+};
+
+const TIME_WINDOW_OPTIONS = (Object.keys(TIME_WINDOW_LABELS) as MapTimeWindow[]).map((value) => ({
+  value,
+  label: TIME_WINDOW_LABELS[value],
+}));
 
 export function MapPage() {
   const { user, isAdmin } = useSession();
@@ -60,12 +77,25 @@ export function MapPage() {
 
   const [onlyRecallable, setOnlyRecallable] = useState(true);
   const [showEmptyCategories, setShowEmptyCategories] = useState(false);
+  const [timeWindow, setTimeWindow] = useState<MapTimeWindow>("all");
   const [pinnedName, setPinnedName] = useState<string | null>(() => searchParams.get("focus"));
   const [hoveredName, setHoveredName] = useState<string | null>(null);
 
+  const baseMemories = useMemo(
+    () => (onlyRecallable ? recall.recallable : allMemories),
+    [onlyRecallable, recall, allMemories],
+  );
+  const windowed = useMemo(
+    () => filterByTimeWindow(baseMemories, timeWindow, Date.now()),
+    [baseMemories, timeWindow],
+  );
   const graph = useMemo(
-    () => buildMapGraph(onlyRecallable ? recall.recallable : allMemories, catalogQuery.data),
-    [onlyRecallable, recall, allMemories, catalogQuery.data],
+    () => buildMapGraph(windowed.memories, catalogQuery.data),
+    [windowed, catalogQuery.data],
+  );
+  const recentByCategory = useMemo(
+    () => countRecentByCategory(windowed.memories, RECENT_RING_DAYS, Date.now()),
+    [windowed],
   );
 
   const emptyCategoryCount = useMemo(
@@ -84,6 +114,8 @@ export function MapPage() {
 
   const activeName = hoveredName ?? pinnedName;
   const activeNode = layout.nodes.find((node) => node.name === activeName) ?? null;
+  const activeRecent = activeNode ? (recentByCategory.get(activeNode.name) ?? 0) : 0;
+  const activeShare = activeNode ? recentShare(activeRecent, activeNode.count) : 0;
   const neighbors = useMemo(
     () => (activeName ? neighborsOf(graph.links, activeName) : []),
     [activeName, graph.links],
@@ -127,7 +159,7 @@ export function MapPage() {
   }, []);
 
   const selectionAnnouncement = activeNode
-    ? `已选中：${activeNode.name}，${activeNode.count} 条记忆，${neighbors.length} 个共现分类`
+    ? `已选中：${activeNode.name}，${activeNode.count} 条记忆，${neighbors.length} 个共现分类，近 30 天新增 ${activeRecent} 条`
     : "";
 
   return (
@@ -158,10 +190,20 @@ export function MapPage() {
           <span aria-hidden className="inline-block h-1 w-6 rounded-full bg-accent/60" />
           连线粗细/深浅 = 共现次数
         </span>
+        <span className="flex items-center gap-1.5">
+          <span aria-hidden className="inline-block size-3 rounded-full border-2 border-accent/80" />
+          外环 = 该分类近 30 天新增占比
+        </span>
         <span>分类 {graph.stats.length} 个 · 共现连线 {graph.links.length} 条</span>
         <span>
           {onlyRecallable ? "可召回记忆" : "记忆"} {formatNumber(graph.total)} 条
+          {timeWindow === "all" ? "" : ` · ${TIME_WINDOW_LABELS[timeWindow]}`}
         </span>
+        {timeWindow !== "all" && windowed.undated > 0 ? (
+          <span className="text-ink-faint">
+            另有 {formatNumber(windowed.undated)} 条记忆没有创建时间，未计入当前时间窗
+          </span>
+        ) : null}
         {allMemories.length >= MEMORY_FETCH_LIMIT ? (
           <span className="text-warn">
             已达单次拉取上限 {MEMORY_FETCH_LIMIT} 条，统计基于这批抽样
@@ -183,6 +225,21 @@ export function MapPage() {
             onChange={(event) => setShowEmptyCategories(event.target.checked)}
           />
           显示空分类（{emptyCategoryCount}）
+        </label>
+        <label className="flex items-center gap-1.5">
+          时间范围
+          <Select
+            aria-label="时间范围"
+            className="h-8 w-28 text-xs"
+            value={timeWindow}
+            onChange={(event) => setTimeWindow(event.target.value as MapTimeWindow)}
+          >
+            {TIME_WINDOW_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
         </label>
       </div>
 
@@ -220,6 +277,19 @@ export function MapPage() {
                 查看全部记忆
               </Button>
             </div>
+          }
+        />
+      ) : timeWindow !== "all" &&
+        windowed.memories.length === 0 &&
+        baseMemories.length > 0 ? (
+        <EmptyState
+          icon={Network}
+          title="所选时间范围内没有记忆"
+          description="当前分类记忆都早于所选时间范围，可以把时间范围切回「全部时间」查看完整地图。"
+          action={
+            <Button variant="primary" size="sm" onClick={() => setTimeWindow("all")}>
+              查看全部时间
+            </Button>
           }
         />
       ) : graph.stats.length === 0 ? (
@@ -269,6 +339,10 @@ export function MapPage() {
                     const faded = activeName !== null && !isNeighbor(node.name);
                     const isEmpty = node.count === 0;
                     const label = labelByName.get(node.name);
+                    const recent = recentByCategory.get(node.name) ?? 0;
+                    const share = recentShare(recent, node.count);
+                    const ringRadius = node.r + 3;
+                    const ringCircumference = 2 * Math.PI * ringRadius;
                     return (
                       <g
                         key={node.name}
@@ -301,6 +375,21 @@ export function MapPage() {
                           strokeWidth={isActive ? 2.4 : 1.4}
                           strokeDasharray={isEmpty ? "5 4" : undefined}
                         />
+                        {share > 0 && !isEmpty ? (
+                          <circle
+                            cx={node.x}
+                            cy={node.y}
+                            r={ringRadius}
+                            fill="none"
+                            stroke="var(--c-accent)"
+                            strokeWidth={3}
+                            strokeLinecap="round"
+                            strokeOpacity={0.8}
+                            strokeDasharray={`${share * ringCircumference} ${ringCircumference}`}
+                            transform={`rotate(-90 ${node.x} ${node.y})`}
+                            pointerEvents="none"
+                          />
+                        ) : null}
                         {node.r >= 16 && !isEmpty ? (
                           <text
                             x={node.x}
@@ -342,6 +431,9 @@ export function MapPage() {
                     <h2 className="font-display text-lg text-ink">{activeNode.name}</h2>
                     <Badge tone="accent">{activeNode.count} 条</Badge>
                   </div>
+                  <p className="text-xs text-ink-soft">
+                    近 30 天新增 {activeRecent} 条（{Math.round(activeShare * 100)}%）
+                  </p>
                   {activeNode.description ? (
                     <p className="text-xs leading-5 text-ink-soft">{activeNode.description}</p>
                   ) : (
@@ -388,6 +480,12 @@ export function MapPage() {
                     <dt className="text-ink-faint">已过期</dt>
                     <dd className="text-right tabular-nums text-ink">{formatNumber(recall.expired)}</dd>
                   </dl>
+                  {windowed.undated > 0 ? (
+                    <dl className="grid grid-cols-2 gap-y-2 text-xs">
+                      <dt className="text-ink-faint">无创建时间</dt>
+                      <dd className="text-right tabular-nums text-ink">{formatNumber(windowed.undated)} 条</dd>
+                    </dl>
+                  ) : null}
                   {isAdmin ? (
                     <Button variant="secondary" size="sm" className="w-full" onClick={() => navigate("/review")}>
                       去审核待审核记忆

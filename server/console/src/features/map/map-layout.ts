@@ -104,6 +104,85 @@ export function splitRecallable(memories: readonly Memory[]): RecallBreakdown {
   return { recallable, pending, rejected, expired };
 }
 
+/** 时间窗口选项；`all` 表示不按时间过滤。 */
+export type MapTimeWindow = "all" | "7d" | "30d" | "90d";
+
+export const TIME_WINDOW_DAYS: Record<Exclude<MapTimeWindow, "all">, number> = {
+  "7d": 7,
+  "30d": 30,
+  "90d": 90,
+};
+
+/** 近 30 天新增用于节点外环。 */
+export const RECENT_RING_DAYS = 30;
+
+/** 一天的毫秒数，时间窗口计算共用。 */
+const DAY_MS = 86_400_000;
+
+export interface TimeWindowResult {
+  memories: Memory[];
+  /** 没有可用 created_at 的记忆条数（无法归入任何时间窗）。 */
+  undated: number;
+}
+
+/** 取记忆的时间戳；空字符串、缺省或无法解析都返回 null。 */
+function createdAtMs(memory: Memory): number | null {
+  if (!memory.created_at) return null;
+  const ms = new Date(memory.created_at).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * 按时间窗口筛选记忆：`all` 返回全部；其余窗口保留时间戳不早于
+ * `now - days * 一天` 的记忆（等于边界也算保留）。无时间的记忆不计入结果。
+ */
+export function filterByTimeWindow(
+  memories: readonly Memory[],
+  window: MapTimeWindow,
+  now: number = Date.now(),
+): TimeWindowResult {
+  const result: Memory[] = [];
+  let undated = 0;
+  const cutoff =
+    window === "all" ? null : now - TIME_WINDOW_DAYS[window] * DAY_MS;
+
+  for (const memory of memories) {
+    const ms = createdAtMs(memory);
+    if (ms === null) {
+      undated += 1;
+      if (cutoff === null) result.push(memory);
+      continue;
+    }
+    if (cutoff === null || ms >= cutoff) result.push(memory);
+  }
+
+  return { memories: result, undated };
+}
+
+/** 每个分类在最近 days 天内新增的条数；没有命中的分类不出现在 Map 里。 */
+export function countRecentByCategory(
+  memories: readonly Memory[],
+  days: number,
+  now: number = Date.now(),
+): Map<string, number> {
+  const cutoff = now - days * DAY_MS;
+  const counts = new Map<string, number>();
+  for (const memory of memories) {
+    const ms = createdAtMs(memory);
+    if (ms === null || ms < cutoff) continue;
+    for (const name of categoriesOf(memory)) {
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/** 近 30 天新增占该分类总数的比例，用于节点外环；结果夹在 [0, 1]。 */
+export function recentShare(recent: number, total: number): number {
+  if (total <= 0) return 0;
+  return Math.min(Math.max(recent / total, 0), 1);
+}
+
 export interface PlacedLabel {
   name: string;
   x: number;
