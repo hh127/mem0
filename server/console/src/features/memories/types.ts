@@ -80,6 +80,10 @@ export interface CreateMemoryInput {
   run_id?: string;
   expiration_date?: string;
   metadata?: Record<string, unknown>;
+  /** true/缺省 = 服务端用 LLM 抽取；false = 手动录入，内容原样落库。 */
+  infer?: boolean;
+  /** 手动录入时的分类标签；自动抽取模式不要发送该字段。 */
+  categories?: string[];
 }
 
 /** `PUT /memories/{id}` 的字段集合；只发送实际改动的键。 */

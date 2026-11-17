@@ -343,6 +343,13 @@ class MemoryCreate(BaseModel):
         None,
         description="Ordered disambiguation rules injected into the categorization prompt for this call.",
     )
+    categories: Optional[List[str]] = Field(
+        None,
+        description=(
+            "手动录入（infer=false）时写入的分类标签：原样落库并跳过自动分类。"
+            "必须与 infer=false 一起使用；自动抽取模式传该字段会返回 400。"
+        ),
+    )
 
 
 class MemoryUpdate(BaseModel):
@@ -898,7 +905,9 @@ def add_memory(memory_create: MemoryCreate, request: Request, _auth=Depends(veri
     if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
         raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
 
-    params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
+    params = {
+        k: v for k, v in memory_create.model_dump().items() if v is not None and k not in ("messages", "categories")
+    }
     _apply_default_expiry(params)
     if params.get("metadata"):
         # 审核结论只能由 /memories/{id}/review 写入，客户端 metadata 不能自带。
@@ -906,6 +915,23 @@ def add_memory(memory_create: MemoryCreate, request: Request, _auth=Depends(veri
     if params.get("custom_categories"):
         # A per-call catalog obeys the same disabled-flag rule as the project one.
         params["custom_categories"] = _enabled_entries(params["custom_categories"])
+    if "categories" in memory_create.model_fields_set:
+        if memory_create.infer is not False:
+            raise HTTPException(status_code=400, detail="categories 仅用于手动录入：请同时传 infer=false。")
+        if memory_create.custom_categories:
+            raise HTTPException(
+                status_code=400,
+                detail="手动录入时 categories 与 custom_categories 不能同时提供。",
+            )
+        try:
+            manual_categories = _normalize_manual_categories(memory_create.categories)
+        except ValueError as e:
+            raise _client_error(e)
+        # categories 是 payload 顶层字段，SDK 的 add() 不接受这个 kwarg，所以走 metadata 合并；
+        # 注意这里在 strip_review_metadata 之后，不能用它把分类一起剥掉。
+        metadata = dict(params.get("metadata") or {})
+        metadata["categories"] = manual_categories
+        params["metadata"] = metadata
     set_usage_context(user_id=memory_create.user_id, operation="add")
     try:
         response = get_memory_instance().add(messages=[m.model_dump() for m in memory_create.messages], **params)

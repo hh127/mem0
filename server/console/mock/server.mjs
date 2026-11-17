@@ -739,7 +739,30 @@ const server = createServer(async (req, res) => {
         if (!scopedUserId) {
           return bad(res, 400, "At least one identifier (user_id, agent_id, run_id) is required.");
         }
-        const category = classify(text);
+        const manual = body.infer === false;
+        const rawCategories = Array.isArray(body.categories) ? body.categories : null;
+        if (!manual && rawCategories) {
+          return bad(res, 400, "\"categories\" 仅用于手动录入：请同时传 \"infer=false\"。");
+        }
+        if (manual && Array.isArray(body.custom_categories) && body.custom_categories.length > 0) {
+          return bad(res, 400, "手动录入时 \"categories\" 与 \"custom_categories\" 不能同时提供。");
+        }
+        let categories;
+        if (manual) {
+          const seen = new Set();
+          categories = [];
+          for (const value of rawCategories ?? []) {
+            const name = String(value ?? "").trim();
+            if (!name || seen.has(name)) continue;
+            seen.add(name);
+            categories.push(name);
+          }
+          if (categories.length > 20) {
+            return bad(res, 400, "too many categories (max 20)");
+          }
+        } else {
+          categories = [classify(text)];
+        }
         const entry = {
           id: uid(),
           memory: text,
@@ -754,7 +777,7 @@ const server = createServer(async (req, res) => {
                   .toISOString()
                   .slice(0, 10)
               : null),
-          categories: body.categories || [category],
+          categories,
           metadata: stripReviewMetadata(body.metadata) || {},
           created_at: now(),
           updated_at: now(),
